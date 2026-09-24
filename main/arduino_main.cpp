@@ -31,17 +31,17 @@ void dumpGamepad(ControllerPtr ctl) {
 
 void setup() {
     BP32.setup(&onConnectedController, &onDisconnectedController);
-    BP32.forgetBluetoothKeys(); 
+    BP32.forgetBluetoothKeys();
     esp_log_level_set("gpio", ESP_LOG_ERROR); // Suppress info log spam from gpio_isr_service
     uni_bt_allowlist_set_enabled(true);
 }
 
 void loop() {
     vTaskDelay(1); // Ensures WDT does not get triggered when no controller is connected
-    BP32.update(); 
+    BP32.update();
     for (auto myController : myControllers) { // Only execute code when controller is connected
-        if (myController && myController->isConnected() && myController->hasData()) {        
-          
+        if (myController && myController->isConnected() && myController->hasData()) {
+
             /*
             ====================
             Your code goes here!
