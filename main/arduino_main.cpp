@@ -13,8 +13,8 @@ extern ControllerPtr myControllers[BP32_MAX_GAMEPADS]; // BP32 library allows fo
 void dumpGamepad(ControllerPtr ctl) {
     Console.printf(
         "DPAD: %d A: %d B: %d X: %d Y: %d LX: %d LY: %d RX: %d RY: %d L1: %d R1: %d L2: %d R2: %d\n",
-        ctl->dpad(),        // D-pad
-        ctl->a(),           // Letter buttons
+        ctl->dpad(),         // D-pad
+        ctl->a(),            // Letter buttons
         ctl->b(),
         ctl->x(),
         ctl->y(),
