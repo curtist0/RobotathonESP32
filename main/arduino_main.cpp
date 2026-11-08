@@ -6,15 +6,43 @@
 #include <Arduino.h>
 #include <Bluepad32.h>
 #include <uni.h>
+#include <QTRSensors.h>
 #include "controller_callbacks.h"
+#include <Wire.h>
+#include <Arduino_APDS9960.h>
+#include <bits/stdc++.h>
+#include <ESP32SharpIR.h>
+#include <ESP32Servo.h>
+
+#define APDS9960_INT 2
+#define I2C_SDA 21
+#define I2C_SCL 22
+#define I2C_FREQ 100000
+
+#define Motor1Pin1  18  // Control pin 1
+#define Motor1Pin2  5  // Control pin 2
+#define Motor2Pin1  17  // Control pin 3
+#define Motor2Pin2  16  // Control pin 4
+
 
 extern ControllerPtr myControllers[BP32_MAX_GAMEPADS]; // BP32 library allows for up to 4 concurrent controller connections, but we only need 1
+
+
+TwoWire I2C_0 = TwoWire(0);
+APDS9960 apds = APDS9960(I2C_0, APDS9960_INT);
+Servo Scoop;
+QTRSensors qtr;
+uint16_t sensors[2];
+
+ESP32SharpIR FrontSensor(ESP32SharpIR::GP2Y0A21YK0F, 12);
+ESP32SharpIR LeftSensor(ESP32SharpIR::GP2Y0A21YK0F, 14);
+ESP32SharpIR RightSensor(ESP32SharpIR::GP2Y0A21YK0F, 27);
 
 void dumpGamepad(ControllerPtr ctl) {
     Console.printf(
         "DPAD: %d A: %d B: %d X: %d Y: %d LX: %d LY: %d RX: %d RY: %d L1: %d R1: %d L2: %d R2: %d\n",
-        ctl->dpad(),         // D-pad
-        ctl->a(),            // Letter buttons
+        ctl->dpad(),        // D-pad
+        ctl->a(),           // Letter buttons
         ctl->b(),
         ctl->x(),
         ctl->y(),
@@ -29,26 +57,158 @@ void dumpGamepad(ControllerPtr ctl) {
     );
 }
 
+
+void lineSensor() {
+    qtr.setTypeAnalog(); 
+    qtr.setSensorPins((const uint8_t[]) {32, 33}, 2); 
+    for (uint8_t i = 0; i < 250; i++) {
+        Console.printf("calibrating %d/250\n", i); 
+        qtr.calibrate();
+        delay(20);
+    }
+}
+
 void setup() {
     BP32.setup(&onConnectedController, &onDisconnectedController);
-    BP32.forgetBluetoothKeys();
+    BP32.forgetBluetoothKeys(); 
     esp_log_level_set("gpio", ESP_LOG_ERROR); // Suppress info log spam from gpio_isr_service
     uni_bt_allowlist_set_enabled(true);
+    //Serial.begin(115200);
+    pinMode(Motor1Pin1, OUTPUT);
+    pinMode(Motor1Pin2, OUTPUT);
+    pinMode(Motor2Pin1, OUTPUT);
+    pinMode(Motor2Pin2, OUTPUT);
+    
+    Scoop.attach(23);
+    I2C_0.begin(I2C_SDA, I2C_SCL, I2C_FREQ);
+    apds.setInterruptPin(APDS9960_INT);
+    apds.begin();
+    qtr.setTypeAnalog(); 
+    qtr.setSensorPins((const uint8_t[]) {32, 33}, 2); // pin numbers go in the curly brackets {}, and number of sensors in use goes after
+
+    for (uint8_t i = 0; i < 250; i++) { 
+        Console.printf("calibrating %d/250\n", i); 
+        qtr.calibrate(); 
+        delay(20);
+        }
+        lineSensor();
+        FrontSensor.setFilterRate(1.0f);
+        LeftSensor.setFilterRate(1.0f);
+        RightSensor.setFilterRate(1.0f);
+    
+}
+
+void scoopServo(Controller* controller){
+    if(controller && controller -> isConnected()){
+        if(controller -> r1()){
+            Scoop.write(0);
+        }
+        if(controller -> l1()){
+            Scoop.write(180);
+        }
+    }
+}
+
+void moveNoob(Controller* controller) {
+    Console.printf("CONTROLLER IS MOVING");
+    if(controller && controller -> isConnected()) {
+        if(controller -> axisRX() > 0) {
+            digitalWrite(Motor1Pin1, HIGH);
+            digitalWrite(Motor1Pin2, LOW);
+            digitalWrite(Motor2Pin1, LOW);
+            digitalWrite(Motor2Pin2, HIGH);
+        }
+        if(controller -> axisRX() < 0) {
+            digitalWrite(Motor1Pin1, LOW);
+            digitalWrite(Motor1Pin2, HIGH);
+            digitalWrite(Motor2Pin1, HIGH);
+            digitalWrite(Motor2Pin2, LOW);
+        }
+        if(controller -> axisY() > 0) {
+            digitalWrite(Motor1Pin1, LOW);
+            digitalWrite(Motor1Pin2, HIGH);
+            digitalWrite(Motor2Pin1, LOW);
+            digitalWrite(Motor2Pin2, HIGH);
+        }
+        if(controller -> axisY() < 0) {
+            digitalWrite(Motor1Pin1, HIGH);
+            digitalWrite(Motor1Pin2, LOW);
+            digitalWrite(Motor2Pin1, HIGH);
+            digitalWrite(Motor2Pin2, LOW);
+        }
+
+        if(controller -> axisRX() == 0 && controller -> axisY() == 0) {
+            digitalWrite(Motor1Pin1, LOW);
+            digitalWrite(Motor2Pin1, LOW);
+            digitalWrite(Motor1Pin2, LOW);
+            digitalWrite(Motor2Pin2, LOW);
+        }
+    }
+}
+
+void color(){
+    int r, g, b, a;
+    while (!apds.colorAvailable()) { delay(5); } // Wait until color is read from the sensor 
+    apds.readColor(r, g, b, a);
+    Console.printf("RED: %d GREEN: %d BLUE: %d AMBIENT: %d\n", r, g, b, a);
+    delay(100);
+}
+
+void line(Controller* controller){
+    qtr.readLineBlack(sensors); 
+    int sensorL = sensors[0];
+    int sensorR = sensors[1];
+    int thres = 750;
+    
+    Console.printf("S1: %d S2: %d\n", sensors[0], sensors[1]);
+    delay(250);
+    if (sensorL > thres && sensorR > thres){
+        digitalWrite(Motor1Pin1, HIGH);
+        digitalWrite(Motor1Pin2, LOW);
+        digitalWrite(Motor2Pin1, HIGH);            
+        digitalWrite(Motor2Pin2, LOW);
+        Console.printf("forward");
+    }
+    else if(sensorL <= thres && sensorR > thres){            
+        digitalWrite(Motor1Pin1, HIGH);
+        digitalWrite(Motor1Pin2, LOW);
+        digitalWrite(Motor2Pin1, LOW);
+        digitalWrite(Motor2Pin2, HIGH);
+        Console.printf("right");
+    }
+    else if(sensorL > thres && sensorR <= thres){
+        digitalWrite(Motor1Pin1, LOW);
+        digitalWrite(Motor1Pin2, HIGH);
+        digitalWrite(Motor2Pin1, HIGH);
+        digitalWrite(Motor2Pin2, LOW);            
+        Console.printf("left");
+     }
+    else{
+        digitalWrite(Motor1Pin1, LOW);              
+        digitalWrite(Motor2Pin1, LOW);
+        digitalWrite(Motor1Pin2, LOW);
+        digitalWrite(Motor2Pin2, LOW);
+        Console.printf("stop ");
+    }
+    delay(250);
 }
 
 void loop() {
-    vTaskDelay(1); // Ensures WDT does not get triggered when no controller is connected
-    BP32.update();
+    vTaskDelay(1);
+    BP32.update(); 
+    delay(100);
+     // Ensures WDT does not get triggered when no controller is connected
     for (auto myController : myControllers) { // Only execute code when controller is connected
-        if (myController && myController->isConnected() && myController->hasData()) {
+        if (myController && myController->isConnected() && myController->hasData()) {  
+             moveNoob(myController);
+            // scoopServo(myController);
 
-            /*
-            ====================
-            Your code goes here!
-            ====================
-            */
-
-            dumpGamepad(myController); // Prints the gamepad state, delete or comment if don't need
+            // if(myController -> y()){
+            //     line(myController);
+            // }
+            dumpGamepad(myController); 
         }
     }
+    //color();
+    //IRSensor(myController);
 }
