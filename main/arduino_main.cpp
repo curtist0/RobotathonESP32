@@ -23,6 +23,7 @@
 #define Motor1Pin2  5  // Control pin 2
 #define Motor2Pin1  17  // Control pin 3
 #define Motor2Pin2  16  // Control pin 4
+int r, g, b, a; 
 
 
 extern ControllerPtr myControllers[BP32_MAX_GAMEPADS]; // BP32 library allows for up to 4 concurrent controller connections, but we only need 1
@@ -151,42 +152,49 @@ bool leftFirst = false;   // true once we've seen a different color
 bool autoRun = false;     // true while running autonomously
 
 // 0 = red, 1 = green, 2 = blue, 3 = unknown
-int getColor() {
-    int r, g, b, a;
-    if (!apds.colorAvailable()) return -1;   // no new reading
+void getColor() {
+    while (!apds.colorAvailable()) { delay(5); } // Wait until color is read from the sensor 
     apds.readColor(r, g, b, a);
     Console.printf("RED: %d GREEN: %d BLUE: %d AMBIENT: %d\n", r, g, b, a);
-    if (r > g * 1.3 && r > b * 1.3) return 0;
-    if (g > r * 1.3 && g > b * 1.3) return 1;
-    if (b > r * 1.3 && b > g * 1.3) return 2;
-    return 3;
+    delay(100);
 }
 
-void stopMotors() {
+void driveStop() {
     digitalWrite(Motor1Pin1, LOW);
     digitalWrite(Motor1Pin2, LOW);
     digitalWrite(Motor2Pin1, LOW);
     digitalWrite(Motor2Pin2, LOW);
 }
 
-void colorRun() {
-    int c = getColor();
-    if (c != -1) {
-        if (firstColor == -1) {
-            firstColor = c;                 // remember the first color
-        } else if (c != firstColor) {
-            leftFirst = true;               // moved off the first color
-        } else if (leftFirst) {             // first color again = duplicate
-            stopMotors();
-            autoRun = false;
-            return;
-        }
-    }
-    digitalWrite(Motor1Pin1, HIGH);         // drive forward
+void driveForward(){
+    digitalWrite(Motor1Pin1, HIGH);
     digitalWrite(Motor1Pin2, LOW);
     digitalWrite(Motor2Pin1, HIGH);
     digitalWrite(Motor2Pin2, LOW);
 }
+
+void colorRun() {
+    getColor();
+    int startR = r;
+    int startG = g;
+    int startB = b;
+
+    driveForward();
+    // Step 3: Keep reading colors over and over as long as we are STILL on the starting color
+    while (abs(r - startR) < 30 && abs(g - startG) < 30 && abs(b - startB) < 30) {
+        getColor(); // Updates r, g, b globally
+    }
+
+    // Step 4: We left the first color! Now keep reading colors until we MATCH the starting color again
+    while (abs(r - startR) > 30 || abs(g - startG) > 30 || abs(b - startB) > 30) {
+        getColor(); // Updates r, g, b globally
+    }
+    driveStop();
+    autoRun = false;
+    return;
+}
+
+
 
 void line(Controller* controller){
     qtr.readLineBlack(sensors); 
@@ -240,7 +248,7 @@ void loop() {
             }
             if (myController->b() && autoRun) {     // B = cancel and take back control
                 autoRun = false;
-                stopMotors();
+                driveStop();
             }
             if (!autoRun) {
                 moveNoob(myController);             // normal manual driving
