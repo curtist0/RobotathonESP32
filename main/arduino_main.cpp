@@ -39,35 +39,37 @@ ESP32SharpIR FrontSensor(ESP32SharpIR::GP2Y0A21YK0F, 12);
 ESP32SharpIR LeftSensor(ESP32SharpIR::GP2Y0A21YK0F, 14);
 ESP32SharpIR RightSensor(ESP32SharpIR::GP2Y0A21YK0F, 27);
 
-void dumpGamepad(ControllerPtr ctl) {
-    Console.printf(
-        "DPAD: %d A: %d B: %d X: %d Y: %d LX: %d LY: %d RX: %d RY: %d L1: %d R1: %d L2: %d R2: %d\n",
-        ctl->dpad(),        // D-pad
-        ctl->a(),           // Letter buttons
-        ctl->b(),
-        ctl->x(),
-        ctl->y(),
-        ctl->axisX(),        // (-511 - 512) left X Axis
-        ctl->axisY(),        // (-511 - 512) left Y axis
-        ctl->axisRX(),       // (-511 - 512) right X axis
-        ctl->axisRY(),       // (-511 - 512) right Y axis
-        ctl->l1(),           // Bumpers
-        ctl->r1(),
-        ctl->l2(),
-        ctl->r2()
-    );
-}
+// void dumpGamepad(ControllerPtr ctl) {
+//      Console.printf(
+//         "DPAD: %d A: %d B: %d X: %d Y: %d LX: %d LY: %d RX: %d RY: %d L1: %d R1: %d L2: %d R2: %d\n",
+        
+//         ctl->dpad(),        // D-pad
+//         ctl->dpad(),        // D-pad
+//         ctl->a(),           // Letter buttons
+//         ctl->b(),
+//         ctl->x(),
+//         ctl->y(),
+//         ctl->axisX(),        // (-511 - 512) left X Axis
+//         ctl->axisY(),        // (-511 - 512) left Y axis
+//         ctl->axisRX(),       // (-511 - 512) right X axis
+//         ctl->axisRY(),       // (-511 - 512) right Y axis
+//         ctl->l1(),           // Bumpers
+//         ctl->r1(),
+//         ctl->l2(),
+//         ctl->r2()
+//     );
+// }
 
 
-void lineSensor() {
-    qtr.setTypeAnalog(); 
-    qtr.setSensorPins((const uint8_t[]) {32, 33}, 2); 
-    for (uint8_t i = 0; i < 250; i++) {
-        Console.printf("calibrating %d/250\n", i); 
-        qtr.calibrate();
-        delay(20);
-    }
-}
+// void lineSensor() {
+//     qtr.setTypeAnalog(); 
+//     qtr.setSensorPins((const uint8_t[]) {32, 33}, 2); 
+//     for (uint8_t i = 0; i < 250; i++) {
+//         Console.printf("calibrating %d/250\n", i); 
+//         qtr.calibrate();
+//         delay(20);
+//     }
+// }
 
 void setup() {
     BP32.setup(&onConnectedController, &onDisconnectedController);
@@ -92,7 +94,7 @@ void setup() {
         qtr.calibrate(); 
         delay(20);
         }
-        lineSensor();
+       // lineSensor();
         FrontSensor.setFilterRate(1.0f);
         LeftSensor.setFilterRate(1.0f);
         RightSensor.setFilterRate(1.0f);
@@ -111,7 +113,6 @@ void scoopServo(Controller* controller){
 }
 
 void moveNoob(Controller* controller) {
-    Console.printf("CONTROLLER IS MOVING");
     if(controller && controller -> isConnected()) {
         if(controller -> axisRX() > 0) {
             digitalWrite(Motor1Pin1, HIGH);
@@ -181,14 +182,16 @@ void colorRun() {
 
     driveForward();
     // Step 3: Keep reading colors over and over as long as we are STILL on the starting color
-    while (abs(r - startR) < 30 && abs(g - startG) < 30 && abs(b - startB) < 30) {
+    while (abs(r - startR) < 7 && abs(g - startG) < 7 && abs(b - startB) < 7) {
         getColor(); // Updates r, g, b globally
     }
 
+
     // Step 4: We left the first color! Now keep reading colors until we MATCH the starting color again
-    while (abs(r - startR) > 30 || abs(g - startG) > 30 || abs(b - startB) > 30) {
+    while (abs(r - startR) >= 7 || abs(g - startG) >= 7 || abs(b - startB) >= 7) {
         getColor(); // Updates r, g, b globally
     }
+    Console.printf("StartR: %d StartG: %d StartB: %d\n", startR, startG, startB);
     driveStop();
     autoRun = false;
     return;
@@ -254,7 +257,6 @@ void loop() {
                 moveNoob(myController);             // normal manual driving
             }
             scoopServo(myController);               // scoop works in both modes
-            dumpGamepad(myController);
         }
     }
     if (autoRun) {
