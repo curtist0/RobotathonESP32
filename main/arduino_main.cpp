@@ -14,7 +14,7 @@
 #include <ESP32SharpIR.h>
 #include <ESP32Servo.h>
 
-#define APDS9960_INT 2
+#define APDS9960_INT 0
 #define I2C_SDA 21
 #define I2C_SCL 22
 #define I2C_FREQ 100000
@@ -146,12 +146,46 @@ void moveNoob(Controller* controller) {
     }
 }
 
-void color(){
+int firstColor = -1;      // -1 = not set yet
+bool leftFirst = false;   // true once we've seen a different color
+bool autoRun = false;     // true while running autonomously
+
+// 0 = red, 1 = green, 2 = blue, 3 = unknown
+int getColor() {
     int r, g, b, a;
-    while (!apds.colorAvailable()) { delay(5); } // Wait until color is read from the sensor 
+    if (!apds.colorAvailable()) return -1;   // no new reading
     apds.readColor(r, g, b, a);
     Console.printf("RED: %d GREEN: %d BLUE: %d AMBIENT: %d\n", r, g, b, a);
-    delay(100);
+    if (r > g * 1.3 && r > b * 1.3) return 0;
+    if (g > r * 1.3 && g > b * 1.3) return 1;
+    if (b > r * 1.3 && b > g * 1.3) return 2;
+    return 3;
+}
+
+void stopMotors() {
+    digitalWrite(Motor1Pin1, LOW);
+    digitalWrite(Motor1Pin2, LOW);
+    digitalWrite(Motor2Pin1, LOW);
+    digitalWrite(Motor2Pin2, LOW);
+}
+
+void colorRun() {
+    int c = getColor();
+    if (c != -1) {
+        if (firstColor == -1) {
+            firstColor = c;                 // remember the first color
+        } else if (c != firstColor) {
+            leftFirst = true;               // moved off the first color
+        } else if (leftFirst) {             // first color again = duplicate
+            stopMotors();
+            autoRun = false;
+            return;
+        }
+    }
+    digitalWrite(Motor1Pin1, HIGH);         // drive forward
+    digitalWrite(Motor1Pin2, LOW);
+    digitalWrite(Motor2Pin1, HIGH);
+    digitalWrite(Motor2Pin2, LOW);
 }
 
 void line(Controller* controller){
@@ -195,20 +229,27 @@ void line(Controller* controller){
 
 void loop() {
     vTaskDelay(1);
-    BP32.update(); 
-    delay(100);
-     // Ensures WDT does not get triggered when no controller is connected
-    for (auto myController : myControllers) { // Only execute code when controller is connected
-        if (myController && myController->isConnected() && myController->hasData()) {  
-             moveNoob(myController);
-            // scoopServo(myController);
-
-            // if(myController -> y()){
-            //     line(myController);
-            // }
-            dumpGamepad(myController); 
+    BP32.update();
+    delay(20);
+    for (auto myController : myControllers) {
+        if (myController && myController->isConnected() && myController->hasData()) {
+            if (myController->a() && !autoRun) {    // Y = start autonomous run
+                autoRun = true;
+                firstColor = -1;
+                leftFirst = false;
+            }
+            if (myController->b() && autoRun) {     // B = cancel and take back control
+                autoRun = false;
+                stopMotors();
+            }
+            if (!autoRun) {
+                moveNoob(myController);             // normal manual driving
+            }
+            scoopServo(myController);               // scoop works in both modes
+            dumpGamepad(myController);
         }
     }
-    //color();
-    //IRSensor(myController);
+    if (autoRun) {
+        colorRun();                                 // runs even between controller packets
+    }
 }
