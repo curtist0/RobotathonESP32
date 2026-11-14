@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2021 Ricardo Quesada
 // http://retro.moe/unijoysticle2
+// Simple version: A = line follow, X = color run, B = stop/manual, R1/L1 = scoop.
+// Keep your existing controller_callbacks.h and its implementation.
+// Uses TWO QTR outputs: GPIO32 = left, GPIO33 = right.
+// Both selected sensors must see black when centered on the line.
+// Motor 1 is left, motor 2 is right. Motors use on/off control as in your original.
+// This basic follower can miss sharp corners; it does not measure a 90-degree turn.
 
 #include "sdkconfig.h"
 #include <Arduino.h>
@@ -10,256 +16,184 @@
 #include "controller_callbacks.h"
 #include <Wire.h>
 #include <Arduino_APDS9960.h>
-#include <bits/stdc++.h>
 #include <ESP32SharpIR.h>
 #include <ESP32Servo.h>
 
-#define APDS9960_INT 0
-#define I2C_SDA 21
-#define I2C_SCL 22
-#define I2C_FREQ 100000
+#define Motor1Pin1 18
+#define Motor1Pin2 5
+#define Motor2Pin1 17
+#define Motor2Pin2 16
 
-#define Motor1Pin1  18  // Control pin 1
-#define Motor1Pin2  5  // Control pin 2
-#define Motor2Pin1  17  // Control pin 3
-#define Motor2Pin2  16  // Control pin 4
-int r, g, b, a; 
-
-
-extern ControllerPtr myControllers[BP32_MAX_GAMEPADS]; // BP32 library allows for up to 4 concurrent controller connections, but we only need 1
-
-
-TwoWire I2C_0 = TwoWire(0);
-APDS9960 apds = APDS9960(I2C_0, APDS9960_INT);
+extern ControllerPtr myControllers[BP32_MAX_GAMEPADS];
+TwoWire I2C_0(0);
+APDS9960 apds(I2C_0, 0);
 Servo Scoop;
 QTRSensors qtr;
+const uint8_t LINE_PINS[] = {32, 33};
 uint16_t sensors[2];
-
 ESP32SharpIR FrontSensor(ESP32SharpIR::GP2Y0A21YK0F, 12);
 ESP32SharpIR LeftSensor(ESP32SharpIR::GP2Y0A21YK0F, 14);
 ESP32SharpIR RightSensor(ESP32SharpIR::GP2Y0A21YK0F, 27);
 
-// void dumpGamepad(ControllerPtr ctl) {
-//      Console.printf(
-//         "DPAD: %d A: %d B: %d X: %d Y: %d LX: %d LY: %d RX: %d RY: %d L1: %d R1: %d L2: %d R2: %d\n",
-        
-//         ctl->dpad(),        // D-pad
-//         ctl->dpad(),        // D-pad
-//         ctl->a(),           // Letter buttons
-//         ctl->b(),
-//         ctl->x(),
-//         ctl->y(),
-//         ctl->axisX(),        // (-511 - 512) left X Axis
-//         ctl->axisY(),        // (-511 - 512) left Y axis
-//         ctl->axisRX(),       // (-511 - 512) right X axis
-//         ctl->axisRY(),       // (-511 - 512) right Y axis
-//         ctl->l1(),           // Bumpers
-//         ctl->r1(),
-//         ctl->l2(),
-//         ctl->r2()
-//     );
-// }
+enum Mode { MANUAL, LINE, COLOR, STOPPED };
+Mode mode = MANUAL;
+bool previousA = false, previousX = false;
+const int LINE_THRESHOLD = 750; // Calibrated values: 0 = white, 1000 = black.
+const uint32_t SEARCH_TIME = 1000; // Maximum time searching without seeing black.
+int lastTurn = 0; // -1 = left, 1 = right, 0 = no direction known yet.
+uint32_t lastLineSeen = 0;
+bool colorReady = false, haveStartColor = false, leftStartColor = false;
+int startR = 0, startG = 0, startB = 0;
+uint32_t lastColorReading = 0;
 
+// For each wheel: 1 = forward, -1 = reverse, 0 = stop.
+void drive(int left, int right) {
+    digitalWrite(Motor1Pin1, left > 0);
+    digitalWrite(Motor1Pin2, left < 0);
+    digitalWrite(Motor2Pin1, right > 0);
+    digitalWrite(Motor2Pin2, right < 0);
+}
 
-// void lineSensor() {
-//     qtr.setTypeAnalog(); 
-//     qtr.setSensorPins((const uint8_t[]) {32, 33}, 2); 
-//     for (uint8_t i = 0; i < 250; i++) {
-//         Console.printf("calibrating %d/250\n", i); 
-//         qtr.calibrate();
-//         delay(20);
-//     }
-// }
+void driveStop() { drive(0, 0); }
+void driveForward() { drive(1, 1); }
+
+void moveNoob(Controller* controller) {
+    if (controller->axisY() < -50) driveForward();
+    else if (controller->axisY() > 50) drive(-1, -1);
+    else if (controller->axisRX() > 50) drive(1, -1);
+    else if (controller->axisRX() < -50) drive(-1, 1);
+    else driveStop();
+}
+
+void line() {
+    analogReadResolution(10); // Match the QTR library's analog reading range.
+    qtr.readCalibrated(sensors);
+    analogReadResolution(12); // Restore the usual ESP32 setting for other sensors.
+
+    bool leftBlack = sensors[0] > LINE_THRESHOLD;
+    bool rightBlack = sensors[1] > LINE_THRESHOLD;
+
+    if (leftBlack || rightBlack) lastLineSeen = millis();
+
+    if (leftBlack && rightBlack) {
+        driveForward();
+    } else if (leftBlack) {
+        lastTurn = -1;
+        drive(-1, 1); // Turn left.
+    } else if (rightBlack) {
+        lastTurn = 1;
+        drive(1, -1); // Turn right.
+    } else if (uint32_t(millis() - lastLineSeen) < SEARCH_TIME && lastTurn != 0) {
+        drive(lastTurn, -lastTurn); // Keep turning toward the last-seen line.
+    } else {
+        driveStop();
+        mode = STOPPED; // Press A again to retry, or B for manual control.
+    }
+}
+
+// The color routine takes one reading per call so B can still interrupt it.
+void colorRun() {
+    int r, g, b, ambient;
+    if (!colorReady || !apds.colorAvailable() || !apds.readColor(r, g, b, ambient)) {
+        if (!colorReady || uint32_t(millis() - lastColorReading) >= 1500) {
+            driveStop();
+            mode = STOPPED;
+        }
+        return;
+    }
+    lastColorReading = millis();
+
+    if (!haveStartColor) {
+        startR = r;
+        startG = g;
+        startB = b;
+        haveStartColor = true;
+    } else {
+        bool sameColor = abs(r - startR) < 7 && abs(g - startG) < 7 && abs(b - startB) < 7;
+        if (!sameColor) leftStartColor = true;
+        else if (leftStartColor) {
+            driveStop();
+            mode = STOPPED;
+            return;
+        }
+    }
+    driveForward();
+}
 
 void setup() {
-    BP32.setup(&onConnectedController, &onDisconnectedController);
-    BP32.forgetBluetoothKeys(); 
-    esp_log_level_set("gpio", ESP_LOG_ERROR); // Suppress info log spam from gpio_isr_service
-    uni_bt_allowlist_set_enabled(true);
-    //Serial.begin(115200);
     pinMode(Motor1Pin1, OUTPUT);
     pinMode(Motor1Pin2, OUTPUT);
     pinMode(Motor2Pin1, OUTPUT);
     pinMode(Motor2Pin2, OUTPUT);
-    
-    Scoop.attach(23);
-    I2C_0.begin(I2C_SDA, I2C_SCL, I2C_FREQ);
-    apds.setInterruptPin(APDS9960_INT);
-    apds.begin();
-    qtr.setTypeAnalog(); 
-    qtr.setSensorPins((const uint8_t[]) {32, 33}, 2); // pin numbers go in the curly brackets {}, and number of sensors in use goes after
-
-    for (uint8_t i = 0; i < 250; i++) { 
-        Console.printf("calibrating %d/250\n", i); 
-        qtr.calibrate(); 
-        delay(20);
-        }
-       // lineSensor();
-        FrontSensor.setFilterRate(1.0f);
-        LeftSensor.setFilterRate(1.0f);
-        RightSensor.setFilterRate(1.0f);
-    
-}
-
-void scoopServo(Controller* controller){
-    if(controller && controller -> isConnected()){
-        if(controller -> r1()){
-            Scoop.write(0);
-        }
-        if(controller -> l1()){
-            Scoop.write(180);
-        }
-    }
-}
-
-void moveNoob(Controller* controller) {
-    if(controller && controller -> isConnected()) {
-        if(controller -> axisRX() > 0) {
-            digitalWrite(Motor1Pin1, HIGH);
-            digitalWrite(Motor1Pin2, LOW);
-            digitalWrite(Motor2Pin1, LOW);
-            digitalWrite(Motor2Pin2, HIGH);
-        }
-        if(controller -> axisRX() < 0) {
-            digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor1Pin2, HIGH);
-            digitalWrite(Motor2Pin1, HIGH);
-            digitalWrite(Motor2Pin2, LOW);
-        }
-        if(controller -> axisY() > 0) {
-            digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor1Pin2, HIGH);
-            digitalWrite(Motor2Pin1, LOW);
-            digitalWrite(Motor2Pin2, HIGH);
-        }
-        if(controller -> axisY() < 0) {
-            digitalWrite(Motor1Pin1, HIGH);
-            digitalWrite(Motor1Pin2, LOW);
-            digitalWrite(Motor2Pin1, HIGH);
-            digitalWrite(Motor2Pin2, LOW);
-        }
-
-        if(controller -> axisRX() == 0 && controller -> axisY() == 0) {
-            digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor2Pin1, LOW);
-            digitalWrite(Motor1Pin2, LOW);
-            digitalWrite(Motor2Pin2, LOW);
-        }
-    }
-}
-
-int firstColor = -1;      // -1 = not set yet
-bool leftFirst = false;   // true once we've seen a different color
-bool autoRun = false;     // true while running autonomously
-
-// 0 = red, 1 = green, 2 = blue, 3 = unknown
-void getColor() {
-    while (!apds.colorAvailable()) { delay(5); } // Wait until color is read from the sensor 
-    apds.readColor(r, g, b, a);
-    Console.printf("RED: %d GREEN: %d BLUE: %d AMBIENT: %d\n", r, g, b, a);
-    delay(100);
-}
-
-void driveStop() {
-    digitalWrite(Motor1Pin1, LOW);
-    digitalWrite(Motor1Pin2, LOW);
-    digitalWrite(Motor2Pin1, LOW);
-    digitalWrite(Motor2Pin2, LOW);
-}
-
-void driveForward(){
-    digitalWrite(Motor1Pin1, HIGH);
-    digitalWrite(Motor1Pin2, LOW);
-    digitalWrite(Motor2Pin1, HIGH);
-    digitalWrite(Motor2Pin2, LOW);
-}
-
-void colorRun() {
-    getColor();
-    int startR = r;
-    int startG = g;
-    int startB = b;
-
-    driveForward();
-    // Step 3: Keep reading colors over and over as long as we are STILL on the starting color
-    while (abs(r - startR) < 7 && abs(g - startG) < 7 && abs(b - startB) < 7) {
-        getColor(); // Updates r, g, b globally
-    }
-
-
-    // Step 4: We left the first color! Now keep reading colors until we MATCH the starting color again
-    while (abs(r - startR) >= 7 || abs(g - startG) >= 7 || abs(b - startB) >= 7) {
-        getColor(); // Updates r, g, b globally
-    }
-    Console.printf("StartR: %d StartG: %d StartB: %d\n", startR, startG, startB);
     driveStop();
-    return;
-}
+    BP32.setup(&onConnectedController, &onDisconnectedController);
+    BP32.forgetBluetoothKeys();
+    esp_log_level_set("gpio", ESP_LOG_ERROR);
+    uni_bt_allowlist_set_enabled(true);
 
+    Scoop.attach(23);
+    I2C_0.begin(21, 22, 100000);
+    apds.setInterruptPin(0);
+    colorReady = apds.begin();
+    FrontSensor.setFilterRate(1.0f);
+    LeftSensor.setFilterRate(1.0f);
+    RightSensor.setFilterRate(1.0f);
 
-
-void line(Controller* controller){
-    qtr.readLineBlack(sensors); 
-    int sensorL = sensors[0];
-    int sensorR = sensors[1];
-    int thres = 750;
-    
-    Console.printf("S1: %d S2: %d\n", sensors[0], sensors[1]);
-    delay(250);
-    if (sensorL > thres && sensorR > thres){
-        digitalWrite(Motor1Pin1, HIGH);
-        digitalWrite(Motor1Pin2, LOW);
-        digitalWrite(Motor2Pin1, HIGH);            
-        digitalWrite(Motor2Pin2, LOW);
-        Console.printf("forward");
+    qtr.setTypeAnalog();
+    qtr.setSensorPins(LINE_PINS, 2);
+    analogReadResolution(10);
+    Console.printf("Move BOTH line sensors across black and white for calibration.\n");
+    for (int i = 0; i < 250; i++) {
+        qtr.calibrate();
+        BP32.update();
+        delay(20);
     }
-    else if(sensorL <= thres && sensorR > thres){            
-        digitalWrite(Motor1Pin1, HIGH);
-        digitalWrite(Motor1Pin2, LOW);
-        digitalWrite(Motor2Pin1, LOW);
-        digitalWrite(Motor2Pin2, HIGH);
-        Console.printf("right");
-    }
-    else if(sensorL > thres && sensorR <= thres){
-        digitalWrite(Motor1Pin1, LOW);
-        digitalWrite(Motor1Pin2, HIGH);
-        digitalWrite(Motor2Pin1, HIGH);
-        digitalWrite(Motor2Pin2, LOW);            
-        Console.printf("left");
-     }
-    else{
-        digitalWrite(Motor1Pin1, LOW);              
-        digitalWrite(Motor2Pin1, LOW);
-        digitalWrite(Motor1Pin2, LOW);
-        digitalWrite(Motor2Pin2, LOW);
-        Console.printf("stop ");
-    }
-    delay(250);
+    analogReadResolution(12);
 }
 
 void loop() {
     vTaskDelay(1);
     BP32.update();
-    delay(20);
-    for (auto myController : myControllers) {
-        if (myController && myController->isConnected() && myController->hasData()) {
-            if (myController->a() && !autoRun) {    // Y = start autonomous run
-                autoRun = true;
-                firstColor = -1;
-                leftFirst = false;
-            }
-            if (myController->b() && autoRun) {     // B = cancel and take back control
-                autoRun = false;
-                driveStop();
-            }
-            if (!autoRun) {
-                moveNoob(myController);             // normal manual driving
-            }
-            scoopServo(myController);               // scoop works in both modes
+    ControllerPtr ctl = nullptr;
+    for (auto controller : myControllers) {
+        if (controller && controller->isConnected() && controller->isGamepad()) {
+            ctl = controller;
+            break;
         }
     }
-    if (autoRun) {
-        colorRun(); 
-        autoRun = false;                                // runs even between controller packets
+    if (!ctl) {
+        driveStop();
+        mode = MANUAL;
+        previousA = previousX = false;
+        return;
     }
+
+    bool aPressed = ctl->a();
+    bool xPressed = ctl->x();
+    if (ctl->r1()) Scoop.write(0);
+    if (ctl->l1()) Scoop.write(180);
+
+    if (ctl->b()) {
+        mode = MANUAL;
+        driveStop(); // Holding B stops even when a joystick is pushed.
+    } else {
+        if (aPressed && !previousA) {
+            mode = LINE;
+            lastTurn = 0;
+            lastLineSeen = millis();
+        } else if (xPressed && !previousX) {
+            driveStop();
+            mode = COLOR;
+            haveStartColor = leftStartColor = false;
+            lastColorReading = millis();
+        }
+
+        if (mode == LINE) line();
+        else if (mode == COLOR) colorRun();
+        else if (mode == MANUAL) moveNoob(ctl);
+        else driveStop();
+    }
+    previousA = aPressed;
+    previousX = xPressed;
+    delay(10);
 }
