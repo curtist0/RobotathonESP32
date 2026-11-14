@@ -227,7 +227,7 @@ void line(Controller* controller) {
         digitalWrite(Motor2Pin1, LOW);
         digitalWrite(Motor1Pin2, LOW);
         digitalWrite(Motor2Pin2, LOW);
-        Console.printf("stop ");
+        Console.printf("stop");
     }
     delay(250);
 }
