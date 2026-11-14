@@ -17,6 +17,8 @@
 #include <bits/stdc++.h>
 #include <uni.h>
 
+#include "ArduinoBluepad32.h"
+#include "ArduinoConsole.h"
 #include "controller_callbacks.h"
 #include "sdkconfig.h"
 
