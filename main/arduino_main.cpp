@@ -62,7 +62,7 @@ ESP32SharpIR RightSensor(ESP32SharpIR::GP2Y0A21YK0F, 27);
 
 // void lineSensor() {
 //     qtr.setTypeAnalog();
-//     qtr.setSensorPins((const uint8_t[]) {32, 33}, 2);
+//     qtr.setSensorPins((const uint8_t[]){32, 33}, 2);
 //     for (uint8_t i = 0; i < 250; i++) {
 //         Console.printf("calibrating %d/250\n", i);
 //         qtr.calibrate();
@@ -137,7 +137,6 @@ void moveNoob(Controller* controller) {
             digitalWrite(Motor2Pin1, HIGH);
             digitalWrite(Motor2Pin2, LOW);
         }
-
         if (controller->axisRX() == 0 && controller->axisY() == 0) {
             digitalWrite(Motor1Pin1, LOW);
             digitalWrite(Motor2Pin1, LOW);
