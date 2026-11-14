@@ -12,7 +12,6 @@
 #include <uni.h>
 
 #include "controller_callbacks.h"
-#include "sdkconfig.h"
 
 extern ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
@@ -178,7 +177,7 @@ void followLine() {
         if (lineVisible()) {
             lastSeen = millis();
             int center = (LINE_COUNT - 1) * 1000 / 2;
-            int correction = (int)((position - center) * LINE_KP);
+            int correction = static_cast<int>((position - center) * LINE_KP);
             // Line on right -> speed up left wheel and slow down right wheel.
             drive(constrain(LINE_SPEED + correction, 0, LINE_MAX_SPEED),
                   constrain(LINE_SPEED - correction, 0, LINE_MAX_SPEED));
@@ -218,9 +217,9 @@ bool readColor(Color& result) {
     }
     int total = r + g + b;
     if (r < 0 || g < 0 || b < 0 || total < MIN_COLOR_SUM) return true;
-    result.r = (float)r / total;
-    result.g = (float)g / total;
-    result.b = (float)b / total;
+    result.r = static_cast<float>(r) / total;
+    result.g = static_cast<float>(g) / total;
+    result.b = static_cast<float>(b) / total;
     float spread = fmaxf(result.r, fmaxf(result.g, result.b)) -
                    fminf(result.r, fminf(result.g, result.b));
     result.valid = spread >= MIN_COLOR_SPREAD;
@@ -372,12 +371,13 @@ void loop() {
         stopRobot();
         cancelled = false;
         buttonsReleased = false;  // Holding a button must not restart a task.
-        if (controller->y())
+        if (controller->y()) {
             calibrateLine();
-        else if (controller->x())
+        } else if (controller->x()) {
             followLine();
-        else
+        } else {
             followColors();
+        }
         stopRobot();  // Completion returns to stopped manual mode.
     } else {
         bool faceButtonDown = controller->a() || controller->x() || controller->y();
@@ -393,8 +393,9 @@ void loop() {
                 right = right * MANUAL_SPEED / peak;
             }
             drive(left, right);
-        } else
+        } else {
             stopRobot();
+        }
     }
     delay(5);  // Yield CPU time to Bluetooth/background work.
 }
