@@ -1,673 +1,400 @@
-// SPDX-License-Identifier: Apache-2.0
-// Original starter attribution: Copyright 2021 Ricardo Quesada
-// http://retro.moe/unijoysticle2
-//
-// ROBOTATHON: line following, two-color navigation, and manual driving.
-// Keep controller_callbacks.h/.cpp and your existing Bluepad32 build project.
-// This file replaces arduino_main.cpp; it is not a standalone ESP-IDF project.
-//
-// Controls: A = line, X = color, Y = calibrate line sensors, B = stop/manual.
-// Manual: left stick Y = throttle, right stick X = steering; R1/L1 = scoop.
-// After B or reconnecting, center both sticks before manual driving is armed.
-// Calibration runs at boot, with the motors OFF. Sweep BOTH QTR outputs over
-// black AND white until the serial monitor says calibration has passed.
-//
-// IMPORTANT PHYSICAL ASSUMPTIONS:
-// * Motor 1 is left, motor 2 right; adjust inversion below if necessary.
-// * QTR outputs are ordered physically left-to-right, ahead of the wheels.
-//   Use two nearby elements so a centered line is visible to at least one.
-// * The first two color tiles are straight ahead and have different, saturated
-//   colors. Neutral floor/gaps are rejected. White/gray/black tiles require a
-//   different floor classifier; lowering MIN_CHROMA alone can learn the floor.
-// * Color A marks turning points; color B indicates the outgoing direction.
-//   Start on A, learn B, drive to A, scan for B, repeat. No turn list is stored.
-// * The downward color sensor MUST be ahead of the pivot axis: a turn must
-//   physically sweep the sensor over the next B tile. A single APDS9960 cannot
-//   see a tile elsewhere on the field. Tune the mounting and scan timing.
-// * No unique finish marker is specified. Missing line / no B after an A causes
-//   a bounded search and STOP, with an ambiguous-end diagnostic, not a claimed
-//   successful finish. Test final-tile behavior on your actual course.
+// Robotathon: simple line following, color navigation, and manual driving.
+// Use this in the RobotathonESP32 starter project, not plain ESP-IDF.
+// Keep the starter project's controller_callbacks files and other files.
+// Read START_HERE.txt before running. All times and speeds need tuning!
 
 #include <Arduino.h>
 #include <Arduino_APDS9960.h>
 #include <Bluepad32.h>
-#include <ESP32PWM.h>  // Bundled with ESP32Servo; shares its PWM allocator.
-#include <ESP32Servo.h>
 #include <QTRSensors.h>
 #include <Wire.h>
-#include <esp_log.h>
 #include <math.h>
 #include <uni.h>
 
-#include <cstdint>
-
 #include "controller_callbacks.h"
+#include "sdkconfig.h"
 
 extern ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
-// All wiring, speeds, and tuning values live here. Speeds use 0..255 PWM.
-namespace Config {
-constexpr uint8_t LEFT_IN1 = 18, LEFT_IN2 = 5;
-constexpr uint8_t RIGHT_IN1 = 17, RIGHT_IN2 = 16;
-constexpr bool INVERT_LEFT = false, INVERT_RIGHT = false;
-constexpr float LEFT_TRIM = 1.0f, RIGHT_TRIM = 1.0f;
-constexpr uint8_t LINE_PINS[] = {32, 33};
-constexpr uint8_t LINE_COUNT = sizeof(LINE_PINS) / sizeof(LINE_PINS[0]);
-constexpr uint8_t SERVO_PIN = 23, SDA_PIN = 21, SCL_PIN = 22;
-constexpr int COLOR_INT_PIN = -1;              // No interrupt wire needed for polling.
-constexpr int SCOOP_DOWN = 0, SCOOP_UP = 180;  // Tune to avoid mechanism binding.
-constexpr int SCOOP_START = 90;
-constexpr uint32_t MOTOR_PWM_HZ = 20000;
-constexpr int DEADZONE = 60, MANUAL_MAX = 210;
-constexpr uint32_t CONTROLLER_TIMEOUT_MS = 1000;  // Stop before Bluetooth detects a lost link.
+// ---------- CHANGE THESE TO MATCH YOUR ROBOT ----------
+// This example uses a DRV8833-style driver: two input pins per motor.
+const int LEFT_IN1 = 16, LEFT_IN2 = 17;
+const int RIGHT_IN1 = 18, RIGHT_IN2 = 19;
+const bool REVERSE_LEFT = false, REVERSE_RIGHT = false;
 
-constexpr uint16_t CALIBRATION_SAMPLES = 250, CALIBRATION_MIN_SPAN = 120;
-constexpr uint32_t CALIBRATION_INTERVAL_MS = 20, LINE_INTERVAL_MS = 10;
-constexpr uint16_t LINE_VISIBLE = 250;  // Calibrated: white=0, black=1000.
-constexpr int LINE_SPEED = 105, LINE_SLOW_SPEED = 65, LINE_TURN_SPEED = 85;
-constexpr float LINE_KP = 140.0f, LINE_KD = 45.0f;
-constexpr uint32_t LINE_GAP_MS = 60, LINE_SWEEP_MS = 350;
-constexpr uint8_t LINE_REACQUIRE_SAMPLES = 2;
+// Connect FOUR neighboring QTR-8A outputs, left to right as seen by the robot.
+// Change this array if your wiring differs. GPIO34/35 are input-only: OK here.
+const uint8_t LINE_PINS[] = {32, 33, 34, 35};
+const uint8_t LINE_COUNT = sizeof(LINE_PINS) / sizeof(LINE_PINS[0]);
+const int LINE_SPEED = 100, LINE_MAX_SPEED = 180;
+const float LINE_KP = 0.08f;   // Larger = stronger steering corrections.
+const int LINE_VISIBLE = 200;  // Calibrated readings range from 0 to 1000.
+const uint32_t LINE_MISSING_MS = 250;
 
-constexpr int COLOR_SPEED = 75, COLOR_TURN_SPEED = 75;
-constexpr uint8_t COLOR_LEARN_SAMPLES = 4, COLOR_MATCH_SAMPLES = 2;
-constexpr float COLOR_MATCH_DISTANCE = 0.10f;  // Euclidean distance in RGB/sum.
-constexpr float COLOR_MIN_SEPARATION = 0.24f;  // A and B must be clearly apart.
-constexpr float MIN_CHROMA = 0.12f;            // max(R,G,B)/sum - min(R,G,B)/sum.
-constexpr int COLOR_MIN_CLEAR = 20, COLOR_SATURATION = 60000;
-constexpr uint32_t COLOR_POLL_MS = 10, COLOR_SENSOR_TIMEOUT_MS = 1500;
-constexpr uint32_t COLOR_FIRST_TIMEOUT_MS = 5000, COLOR_TRAVEL_TIMEOUT_MS = 8000;
-constexpr uint32_t COLOR_SETTLE_MS = 150;
-// At the chosen turn speed, tune this to about 100 degrees per side. Keep the
-// scan below 150 degrees so it does not rediscover the previous B behind you.
-// Time is only an estimate of angle; wheel slip and battery level affect it.
-constexpr uint32_t COLOR_SCAN_HALF_MS = 750;
-// Optional forward adjustment to put the axle at a corner. Default: none.
-constexpr uint32_t COLOR_PIVOT_ADVANCE_MS = 0;
-constexpr uint32_t AUTONOMOUS_TIMEOUT_MS = 120000;
-constexpr bool TELEMETRY = true;
-constexpr uint32_t TELEMETRY_INTERVAL_MS = 250;
-}  // namespace Config
+const int MANUAL_SPEED = 180;   // PWM speed: 0 to 255.
+const int STICK_DEADZONE = 45;  // Ignore small joystick movements.
+const uint32_t CONTROLLER_TIMEOUT_MS = 1000;
 
-static_assert(Config::LINE_COUNT == 2, "This follower is tuned for two QTR outputs.");
+const int COLOR_SPEED = 75, TURN_SPEED = 85;
+const uint32_t TURN_90_MS = 450;  // Measure how long YOUR robot takes to turn.
+const uint32_t CENTER_MS = 200;   // Move axle toward tile center before turning.
+const uint32_t PROBE_MS = 650;    // Enough travel to see an adjacent tile.
+const uint32_t STRAIGHT_TIMEOUT_MS = 8000;
+const float COLOR_TOLERANCE = 0.16f;
+const int MIN_COLOR_SUM = 30;          // Reject readings with too little light.
+const float MIN_COLOR_SPREAD = 0.12f;  // Ignore neutral floor/gaps; see guide.
+const int STABLE_READINGS = 4;         // Require several matching sensor readings.
 
-enum class Mode { STOPPED,
-                  MANUAL,
-                  CALIBRATING,
-                  LINE,
-                  COLOR };
-enum class ColorPhase {
-    LEARN_FIRST,
-    LEARN_SECOND,
-    DRIVE_TO_FIRST,
-    ADVANCE_AT_FIRST,
-    SETTLE_AT_FIRST,
-    SCAN_LEFT,
-    RETURN_FROM_LEFT,
-    SCAN_RIGHT,
-    RETURN_FROM_RIGHT,
-    SETTLE_ON_SECOND
-};
-
-TwoWire colorBus(0);
-APDS9960 apds(colorBus, Config::COLOR_INT_PIN);
-Servo scoop;
-ESP32PWM motorPwm[4];
+// ---------- SENSOR AND CONTROLLER OBJECTS ----------
+TwoWire colorWire(0);
+APDS9960 colorSensor(colorWire, -1);  // Polling RGB: the interrupt pin is unused.
 QTRSensors qtr;
-Mode mode = Mode::STOPPED;
-bool motorsReady = false, colorReady = false, lineCalibrated = false;
-bool manualArmed = false;
-ControllerPtr activeController = nullptr;
-bool previousA = false, previousX = false, previousY = false;
-uint32_t autonomousStarted = 0, lastTelemetry = 0;
-uint32_t lastControllerReport = 0;
-int leftCommand = 0, rightCommand = 0;
+uint16_t lineValues[LINE_COUNT];
+ControllerPtr controller = nullptr;
+bool receivedPacket = false, cancelled = false;
+bool colorReady = false, lineCalibrated = false;
+uint32_t lastPacketTime = 0;
 
-struct LineState {
-    uint16_t values[Config::LINE_COUNT] = {};
-    uint16_t calibrationSamples = 0;
-    uint32_t lastCalibration = 0, lastTick = 0, lostAt = 0;
-    float previousError = 0;
-    int lastDirection = 1;
-    uint8_t reacquireCount = 0;
-    bool searching = false, derivativeReady = false;
-} lineState;
-
-// Compare proportions instead of raw RGB counts. Multiplying the illumination
-// by a common factor then has much less effect on the learned color.
-struct ColorSample {
+// Store proportions instead of exact RGB brightness, which changes with light.
+struct Color {
     float r = 0, g = 0, b = 0;
-    int clear = 0;
     bool valid = false;
 };
+Color firstColor, secondColor;
 
-struct ColorState {
-    ColorPhase phase = ColorPhase::LEARN_FIRST;
-    ColorSample first, second, candidate, latest;
-    uint8_t candidateCount = 0, matchCount = 0;
-    uint32_t phaseStarted = 0, lastPoll = 0, lastReading = 0;
-    uint32_t cornerCount = 0;
-} colorState;
-
-// Unsigned subtraction keeps every timer correct across millis() rollover.
-bool elapsed(uint32_t now, uint32_t since, uint32_t duration) { return static_cast<uint32_t>(now - since) >= duration; }
-
-int clampMotor(int value) { return constrain(value, -255, 255); }
-
-// Always clear the inactive H-bridge input before energizing the other one.
-// PWM objects and the servo use the SAME allocator, avoiding timer collisions.
-void writeWheel(uint8_t index, int command) {
-    ESP32PWM &forward = motorPwm[index], &reverse = motorPwm[index + 1];
-    if (command > 0) {
-        reverse.writeScaled(0);
-        forward.writeScaled(command / 255.0f);
+// ---------- BASIC MOVEMENT ----------
+void motor(int in1, int in2, int speed) {
+    speed = constrain(speed, -255, 255);
+    // Switch the inactive side off before powering the other direction.
+    if (speed >= 0) {
+        analogWrite(in2, 0);
+        analogWrite(in1, speed);
     } else {
-        forward.writeScaled(0);
-        reverse.writeScaled(-command / 255.0f);
+        analogWrite(in1, 0);
+        analogWrite(in2, -speed);
     }
 }
 
 void drive(int left, int right) {
-    leftCommand = clampMotor(left);
-    rightCommand = clampMotor(right);
-    if (!motorsReady) return;
-    left = clampMotor(static_cast<int>(leftCommand * Config::LEFT_TRIM));
-    right = clampMotor(static_cast<int>(rightCommand * Config::RIGHT_TRIM));
-    writeWheel(0, Config::INVERT_LEFT ? -left : left);
-    writeWheel(2, Config::INVERT_RIGHT ? -right : right);
+    motor(LEFT_IN1, LEFT_IN2, REVERSE_LEFT ? -left : left);
+    motor(RIGHT_IN1, RIGHT_IN2, REVERSE_RIGHT ? -right : right);
 }
 
-void stopRobot(const char* reason) {
-    drive(0, 0);
-    mode = Mode::STOPPED;
-    manualArmed = false;
-    Console.printf("STOP: %s\n", reason);
-}
+void stopRobot() { drive(0, 0); }
 
-// direction: -1 = left, +1 = right.
-void pivot(int direction, int speed) { drive(direction * speed, -direction * speed); }
-
-int joystickToSpeed(int value) {
-    value = constrain(value, -512, 512);
-    int magnitude = abs(value);
-    if (magnitude <= Config::DEADZONE) return 0;
-    int speed = (magnitude - Config::DEADZONE) * Config::MANUAL_MAX / (512 - Config::DEADZONE);
-    return value < 0 ? -speed : speed;
-}
-
-void runManual(ControllerPtr controller) {
-    int throttle = joystickToSpeed(-controller->axisY());
-    int steering = joystickToSpeed(controller->axisRX());
-    if (!manualArmed) {
-        drive(0, 0);
-        if (throttle == 0 && steering == 0) manualArmed = true;
-        return;
-    }
-    int left = throttle + steering, right = throttle - steering;
-    // Scale BOTH wheels together to preserve steering when the mix saturates.
-    int peak = max(abs(left), abs(right));
-    if (peak > Config::MANUAL_MAX) {
-        left = left * Config::MANUAL_MAX / peak;
-        right = right * Config::MANUAL_MAX / peak;
-    }
-    drive(left, right);
-    // Mechanical and driver challenges remain under manual control.
-    if (controller->r1()) {
-        scoop.write(Config::SCOOP_DOWN);
-    } else if (controller->l1()) {
-        scoop.write(Config::SCOOP_UP);
-    }
-}
-
-void beginCalibration(uint32_t now) {
-    drive(0, 0);
-    mode = Mode::CALIBRATING;
-    lineCalibrated = false;
-    qtr.resetCalibration();
-    lineState.calibrationSamples = 0;
-    lineState.lastCalibration = now;
-    Console.printf("CALIBRATE: sweep BOTH sensors over black AND white for 5 seconds.\n");
-}
-
-void runCalibration(uint32_t now) {
-    drive(0, 0);
-    if (!elapsed(now, lineState.lastCalibration, Config::CALIBRATION_INTERVAL_MS)) return;
-    lineState.lastCalibration = now;
-    qtr.calibrate();
-    if (++lineState.calibrationSamples < Config::CALIBRATION_SAMPLES) return;
-
-    // No usable contrast means calibrated values would be misleading.
-    bool good = qtr.calibrationOn.initialized && qtr.calibrationOn.minimum && qtr.calibrationOn.maximum;
-    if (good) {
-        for (uint8_t i = 0; i < Config::LINE_COUNT; ++i) {
-            int span = static_cast<int>(qtr.calibrationOn.maximum[i]) - qtr.calibrationOn.minimum[i];
-            Console.printf("QTR %u raw min=%u max=%u span=%d\n", i, qtr.calibrationOn.minimum[i],
-                           qtr.calibrationOn.maximum[i], span);
-            if (span < Config::CALIBRATION_MIN_SPAN) good = false;
+// Refresh Bluetooth often, including inside autonomous movement loops.
+bool updateController() {
+    bool fresh = BP32.update();
+    ControllerPtr previous = controller;
+    controller = nullptr;
+    for (auto pad : myControllers) {
+        if (pad && pad->isConnected() && pad->isGamepad()) {
+            controller = pad;
+            break;  // Only one controller operates this robot.
         }
     }
-    lineCalibrated = good;
-    stopRobot(good ? "Calibration passed. B=manual, A=line, X=color." : "Calibration failed. Press Y and sweep BOTH sensors over black/white.");
-}
-
-bool lineVisible() {
-    return lineState.values[0] >= Config::LINE_VISIBLE || lineState.values[1] >= Config::LINE_VISIBLE;
-}
-
-void beginLine(uint32_t now) {
-    drive(0, 0);
-    if (!lineCalibrated) {
-        stopRobot("Press Y to calibrate the line sensors first.");
-        return;
+    if (controller != previous) receivedPacket = false;
+    if (fresh && controller && controller->hasData()) {
+        lastPacketTime = millis();
+        receivedPacket = true;
     }
-    lineState = LineState{};
-    qtr.readCalibrated(lineState.values);
-    if (!lineVisible()) {
-        stopRobot("Place the line sensors on the starting line, then press A.");
-        return;
-    }
-    lineState.lastTick = now;
-    mode = Mode::LINE;
-    autonomousStarted = now;
-    Console.printf("LINE: following. B cancels. A retry must start at the beginning.\n");
+    return controller && receivedPacket &&
+           millis() - lastPacketTime < CONTROLLER_TIMEOUT_MS;
 }
 
-void runLine(uint32_t now) {
-    if (!elapsed(now, lineState.lastTick, Config::LINE_INTERVAL_MS)) return;
-    lineState.lastTick = now;
-    qtr.readCalibrated(lineState.values);
-    bool visible = lineVisible();
-    if (!visible && !lineState.searching) {
-        lineState.searching = true;
-        lineState.lostAt = now;
-        lineState.reacquireCount = 0;
-        lineState.derivativeReady = false;
-    }
-    if (lineState.searching) {
-        if (visible) {
-            if (++lineState.reacquireCount < Config::LINE_REACQUIRE_SAMPLES) {
-                drive(0, 0);
-                return;
-            }
-            lineState.searching = false;
-        } else {
-            lineState.reacquireCount = 0;
-            uint32_t lost = now - lineState.lostAt;
-            if (lost < Config::LINE_GAP_MS) {
-                drive(Config::LINE_SLOW_SPEED, Config::LINE_SLOW_SPEED);
-            } else {
-                uint32_t sweep = lost - Config::LINE_GAP_MS;
-                // Scan toward the last-seen line, through the other side, then
-                // approximately back to the original heading. Never search forever.
-                if (sweep < Config::LINE_SWEEP_MS) {
-                    pivot(lineState.lastDirection, Config::LINE_TURN_SPEED);
-                } else if (sweep < 3 * Config::LINE_SWEEP_MS) {
-                    pivot(-lineState.lastDirection, Config::LINE_TURN_SPEED);
-                } else if (sweep < 4 * Config::LINE_SWEEP_MS) {
-                    pivot(lineState.lastDirection, Config::LINE_TURN_SPEED);
-                } else {
-                    stopRobot("Line ended OR was lost. Verify position; retry from the start.");
-                }
-            }
-            return;
-        }
-    }
-    // Weighted two-sensor position: negative means line left, positive right.
-    // A positive correction speeds up the left wheel, turning the robot right.
-    float left = lineState.values[0], right = lineState.values[1];
-    float error = (right - left) / (right + left);
-    float derivative = lineState.derivativeReady ? error - lineState.previousError : 0;
-    lineState.previousError = error;
-    lineState.derivativeReady = true;
-    if (fabsf(error) > 0.08f) lineState.lastDirection = error > 0 ? 1 : -1;
-    int correction = static_cast<int>(Config::LINE_KP * error + Config::LINE_KD * derivative);
-    int base = fabsf(error) > 0.45f ? Config::LINE_SLOW_SPEED : Config::LINE_SPEED;
-    drive(base + correction, base - correction);
+void cancelTask(const char* reason) {
+    stopRobot();
+    cancelled = true;
+    Console.printf("%s\n", reason);
 }
 
-float colorDistanceSquared(const ColorSample& a, const ColorSample& b) {
-    float dr = a.r - b.r, dg = a.g - b.g, db = a.b - b.b;
-    return dr * dr + dg * dg + db * db;
-}
-
-bool colorsMatch(const ColorSample& a, const ColorSample& b) {
-    return a.valid && b.valid && colorDistanceSquared(a, b) <= Config::COLOR_MATCH_DISTANCE * Config::COLOR_MATCH_DISTANCE;
-}
-
-// Return true only for a NEW reading. A dark/neutral reading is still new but
-// has valid=false, so gaps break a streak instead of reusing the last tile.
-bool pollColor(uint32_t now, ColorSample& sample) {
-    if (!elapsed(now, colorState.lastPoll, Config::COLOR_POLL_MS)) return false;
-    colorState.lastPoll = now;
-    if (!apds.colorAvailable()) return false;
-    int r, g, b, clear;
-    if (!apds.readColor(r, g, b, clear)) return false;
-    colorState.lastReading = now;
-    sample = ColorSample{};
-    sample.clear = clear;
-    int total = r + g + b;
-    if (r < 0 || g < 0 || b < 0 || total <= 0 || clear < Config::COLOR_MIN_CLEAR ||
-        max(max(r, g), max(b, clear)) >= Config::COLOR_SATURATION) {
-        return true;
+bool keepRunning() {
+    bool connected = updateController();
+    if (!connected || controller->b()) {
+        cancelTask("Stopped: B pressed or controller connection lost.");
     }
-    sample.r = static_cast<float>(r) / total;
-    sample.g = static_cast<float>(g) / total;
-    sample.b = static_cast<float>(b) / total;
-    float chroma = max(max(sample.r, sample.g), sample.b) - min(min(sample.r, sample.g), sample.b);
-    sample.valid = chroma >= Config::MIN_CHROMA;
+    return !cancelled;
+}
+
+// Unlike a long delay(), this keeps checking the stop button and connection.
+bool moveFor(int left, int right, uint32_t duration) {
+    uint32_t start = millis();
+    while (millis() - start < duration) {
+        if (!keepRunning()) return false;
+        drive(left, right);
+        delay(5);
+    }
+    stopRobot();
     return true;
 }
 
-// A candidate must remain consistent for multiple independent sensor frames.
-// The average is anchored by the first frame to avoid drifting across an edge.
-bool learnColor(const ColorSample& sample, ColorSample& learned) {
-    if (!sample.valid) {
-        colorState.candidateCount = 0;
+// ---------- LINE CHALLENGE ----------
+void calibrateLine() {
+    stopRobot();
+    lineCalibrated = false;
+    qtr.resetCalibration();
+    Console.printf("For 5 seconds, move every line sensor over tape AND floor.\n");
+    for (int i = 0; i < 250; ++i) {
+        if (!keepRunning()) return;
+        qtr.calibrate();
+        delay(20);  // Motors stay off while you move the robot.
+    }
+    if (!qtr.calibrationOn.minimum || !qtr.calibrationOn.maximum) {
+        Console.printf("Calibration unavailable. Check the QTR library/setup.\n");
+        return;
+    }
+    for (uint8_t i = 0; i < LINE_COUNT; ++i) {
+        int span = qtr.calibrationOn.maximum[i] - qtr.calibrationOn.minimum[i];
+        Console.printf("Sensor %u calibration range: %d\n", i, span);
+        if (span < 80) {
+            Console.printf("Too little contrast. Check height/wiring and calibrate again.\n");
+            return;
+        }
+    }
+    lineCalibrated = true;
+    Console.printf("Line calibrated. Put robot on the START of the line; press X.\n");
+}
+
+bool lineVisible() {
+    for (uint8_t i = 0; i < LINE_COUNT; ++i) {
+        if (lineValues[i] >= LINE_VISIBLE) return true;
+    }
+    return false;
+}
+
+void followLine() {
+    if (!lineCalibrated) {
+        Console.printf("Press Y to calibrate the line sensors first.\n");
+        return;
+    }
+    qtr.readLineBlack(lineValues);
+    if (!lineVisible()) {
+        Console.printf("No starting line visible. Put sensors over the line.\n");
+        return;
+    }
+    uint32_t lastSeen = millis();
+    while (keepRunning()) {
+        int position = qtr.readLineBlack(lineValues);
+        if (lineVisible()) {
+            lastSeen = millis();
+            int center = (LINE_COUNT - 1) * 1000 / 2;
+            int correction = (int)((position - center) * LINE_KP);
+            // Line on right -> speed up left wheel and slow down right wheel.
+            drive(constrain(LINE_SPEED + correction, 0, LINE_MAX_SPEED),
+                  constrain(LINE_SPEED - correction, 0, LINE_MAX_SPEED));
+        } else {
+            // Briefly creep straight across a tiny gap, then stop if still missing.
+            drive(45, 45);
+            if (millis() - lastSeen >= LINE_MISSING_MS) {
+                Console.printf("Line ended OR line lost. Stopping. If lost, reset at start.\n");
+                break;
+            }
+        }
+        delay(5);
+    }
+    stopRobot();
+}
+
+// ---------- COLOR CHALLENGE ----------
+float colorDifference(const Color& a, const Color& b) {
+    return fabsf(a.r - b.r) + fabsf(a.g - b.g) + fabsf(a.b - b.b);
+}
+
+bool readColor(Color& result) {
+    result.valid = false;
+    uint32_t start = millis();
+    while (!colorSensor.colorAvailable()) {
+        if (!keepRunning()) return false;
+        if (millis() - start > 500) {
+            cancelTask("Color sensor timed out. Check sensor wiring.");
+            return false;
+        }
+        delay(5);
+    }
+    int r, g, b, clear;
+    if (!colorSensor.readColor(r, g, b, clear)) {
+        cancelTask("Could not read color sensor.");
         return false;
     }
-    if (!colorState.candidateCount || !colorsMatch(sample, colorState.candidate)) {
-        colorState.candidate = sample;
-        colorState.candidateCount = 1;
-        learned = sample;
-    } else {
-        float n = colorState.candidateCount;
-        learned.r = (learned.r * n + sample.r) / (n + 1);
-        learned.g = (learned.g * n + sample.g) / (n + 1);
-        learned.b = (learned.b * n + sample.b) / (n + 1);
-        ++colorState.candidateCount;
+    int total = r + g + b;
+    if (r < 0 || g < 0 || b < 0 || total < MIN_COLOR_SUM) return true;
+    result.r = (float)r / total;
+    result.g = (float)g / total;
+    result.b = (float)b / total;
+    float spread = fmaxf(result.r, fmaxf(result.g, result.b)) -
+                   fminf(result.r, fminf(result.g, result.b));
+    result.valid = spread >= MIN_COLOR_SPREAD;
+    return true;
+}
+
+// Wait for a stable match. This reads colors; it does not choose motor speeds.
+// wanted == nullptr means learn a color, excluding the first if already saved.
+bool waitForColor(Color& found, const Color* wanted, uint32_t timeout) {
+    uint32_t start = millis();
+    Color candidate;
+    int stable = 0;
+    while (millis() - start < timeout && keepRunning()) {
+        Color now;
+        if (!readColor(now)) return false;
+        bool matches = now.valid;
+        if (wanted) {
+            matches = matches && colorDifference(now, *wanted) < COLOR_TOLERANCE;
+        } else if (firstColor.valid) {
+            // Reject ambiguous mixtures close to the first color when learning B.
+            matches = matches && colorDifference(now, firstColor) > 2 * COLOR_TOLERANCE;
+        }
+        if (!matches) {
+            stable = 0;
+        } else {
+            if (stable == 0 || colorDifference(now, candidate) >= COLOR_TOLERANCE) {
+                candidate = now;
+                stable = 1;
+            } else {
+                ++stable;
+            }
+            if (stable >= STABLE_READINGS) {
+                found = candidate;
+                return true;
+            }
+        }
+        delay(5);
     }
-    return colorState.candidateCount >= Config::COLOR_LEARN_SAMPLES;
+    return false;
 }
 
-bool confirmedColor(const ColorSample& sample, const ColorSample& target) {
-    if (!colorsMatch(sample, target)) {
-        colorState.matchCount = 0;
-        return false;
+bool driveToColor(const Color* wanted, Color& found, uint32_t timeout) {
+    if (!keepRunning()) return false;
+    drive(COLOR_SPEED, COLOR_SPEED);
+    bool matched = waitForColor(found, wanted, timeout);
+    stopRobot();
+    return matched;
+}
+
+bool probeForSecondColor() {
+    // After turning, move far enough for the sensor to reach the next tile.
+    uint32_t start = millis();
+    Color found;
+    bool matched = driveToColor(&secondColor, found, PROBE_MS);
+    uint32_t travelTime = millis() - start;
+    if (!matched && !cancelled) {
+        // Wrong direction: back up to approximately the same turning location.
+        moveFor(-COLOR_SPEED, -COLOR_SPEED, travelTime);
     }
-    if (colorState.matchCount < Config::COLOR_MATCH_SAMPLES) ++colorState.matchCount;
-    return colorState.matchCount >= Config::COLOR_MATCH_SAMPLES;
+    return matched;
 }
 
-void setColorPhase(ColorPhase phase, uint32_t now) {
-    drive(0, 0);
-    colorState.phase = phase;
-    colorState.phaseStarted = now;
-    colorState.matchCount = colorState.candidateCount = 0;
-    Console.printf("COLOR phase=%u, A corners=%lu\n", static_cast<unsigned>(phase), static_cast<uint32_t>(colorState.cornerCount));
+bool findNextDirection() {
+    // Try LEFT, then RIGHT. Never choose the B tile we just came from behind us.
+    if (!moveFor(-TURN_SPEED, TURN_SPEED, TURN_90_MS)) return false;
+    if (probeForSecondColor()) return true;
+    if (cancelled) return false;
+    if (!moveFor(TURN_SPEED, -TURN_SPEED, 2 * TURN_90_MS)) return false;
+    if (probeForSecondColor()) return true;
+    if (cancelled) return false;
+    // No continuation found. Restore approximately the original heading.
+    moveFor(-TURN_SPEED, TURN_SPEED, TURN_90_MS);
+    return false;
 }
 
-void beginColor(uint32_t now) {
-    drive(0, 0);
+void followColors() {
+    stopRobot();
     if (!colorReady) {
-        stopRobot("APDS9960 not initialized. Check 3.3V power and I2C wiring; reboot.");
+        Console.printf("Color sensor did not initialize. Check wiring, then reboot.\n");
         return;
     }
-    colorState = ColorState{};
-    colorState.lastReading = colorState.lastPoll = now;
-    mode = Mode::COLOR;
-    autonomousStarted = now;
-    setColorPhase(ColorPhase::LEARN_FIRST, now);
-    Console.printf("COLOR: hold still on the first tile (A), pointed at the second tile (B).\n");
-}
-
-void runColor(uint32_t now) {
-    ColorSample sample;
-    bool fresh = pollColor(now, sample);
-    if (fresh) colorState.latest = sample;
-    if (elapsed(now, colorState.lastReading, Config::COLOR_SENSOR_TIMEOUT_MS)) {
-        stopRobot("No fresh APDS9960 readings. Check the sensor and wiring.");
+    firstColor = Color{};
+    secondColor = Color{};
+    Console.printf("Learning FIRST color. Start on tile 1 facing tile 2.\n");
+    if (!waitForColor(firstColor, nullptr, 2000)) {
+        if (!cancelled) Console.printf("No stable colored tile found. Check lighting.\n");
         return;
     }
-    uint32_t phaseTime = now - colorState.phaseStarted;
-    switch (colorState.phase) {
-        case ColorPhase::LEARN_FIRST:
-            drive(0, 0);
-            // Discard initial frames that may have integrated before X was pressed.
-            if (phaseTime < Config::COLOR_SETTLE_MS) return;
-            if (fresh && learnColor(sample, colorState.first)) {
-                Console.printf("Learned A: %.3f %.3f %.3f\n", colorState.first.r, colorState.first.g, colorState.first.b);
-                setColorPhase(ColorPhase::LEARN_SECOND, now);
-            } else if (phaseTime >= Config::COLOR_FIRST_TIMEOUT_MS) {
-                stopRobot("Cannot learn A: check lighting, saturation, sensor height, and tile color.");
-            }
-            break;
-
-        case ColorPhase::LEARN_SECOND:
-            drive(Config::COLOR_SPEED, Config::COLOR_SPEED);
-            if (fresh) {
-                // Reject A, neutral floor, and blended boundary readings.
-                float separation = colorDistanceSquared(sample, colorState.first);
-                if (!sample.valid || separation < Config::COLOR_MIN_SEPARATION * Config::COLOR_MIN_SEPARATION) {
-                    colorState.candidateCount = 0;
-                } else if (learnColor(sample, colorState.second)) {
-                    Console.printf("Learned B: %.3f %.3f %.3f\n", colorState.second.r, colorState.second.g, colorState.second.b);
-                    setColorPhase(ColorPhase::DRIVE_TO_FIRST, now);
-                }
-            }
-            if (mode == Mode::COLOR && colorState.phase == ColorPhase::LEARN_SECOND &&
-                phaseTime >= Config::COLOR_TRAVEL_TIMEOUT_MS) {
-                stopRobot("No distinct second tile found. Check alignment, background, and thresholds.");
-            }
-            break;
-
-        case ColorPhase::DRIVE_TO_FIRST:
-            drive(Config::COLOR_SPEED, Config::COLOR_SPEED);
-            if (fresh && confirmedColor(sample, colorState.first)) {
-                ++colorState.cornerCount;
-                setColorPhase(ColorPhase::ADVANCE_AT_FIRST, now);
-            } else if (phaseTime >= Config::COLOR_TRAVEL_TIMEOUT_MS) {
-                stopRobot("Expected A was not reached. Check heading, speed, and color matching.");
-            }
-            break;
-
-        case ColorPhase::ADVANCE_AT_FIRST:
-            if (phaseTime >= Config::COLOR_PIVOT_ADVANCE_MS) {
-                setColorPhase(ColorPhase::SETTLE_AT_FIRST, now);
-            } else {
-                drive(Config::COLOR_SPEED, Config::COLOR_SPEED);
-            }
-            break;
-
-        case ColorPhase::SETTLE_AT_FIRST:
-            drive(0, 0);
-            if (phaseTime >= Config::COLOR_SETTLE_MS) setColorPhase(ColorPhase::SCAN_LEFT, now);
-            break;
-
-        case ColorPhase::SCAN_LEFT:
-        case ColorPhase::SCAN_RIGHT:
-            // Only search for B during outward sweeps. Return sweeps ignore tiles.
-            // Two matches reduce the chance that a mixed edge picks a false heading.
-            if (fresh && confirmedColor(sample, colorState.second)) {
-                setColorPhase(ColorPhase::SETTLE_ON_SECOND, now);
-            } else if (phaseTime >= Config::COLOR_SCAN_HALF_MS) {
-                setColorPhase(colorState.phase == ColorPhase::SCAN_LEFT ? ColorPhase::RETURN_FROM_LEFT : ColorPhase::RETURN_FROM_RIGHT, now);
-            } else {
-                pivot(colorState.phase == ColorPhase::SCAN_LEFT ? -1 : 1, Config::COLOR_TURN_SPEED);
-            }
-            break;
-
-        case ColorPhase::RETURN_FROM_LEFT:
-            if (phaseTime >= Config::COLOR_SCAN_HALF_MS) {
-                setColorPhase(ColorPhase::SCAN_RIGHT, now);
-            } else {
-                pivot(1, Config::COLOR_TURN_SPEED);
-            }
-            break;
-
-        case ColorPhase::RETURN_FROM_RIGHT:
-            if (phaseTime >= Config::COLOR_SCAN_HALF_MS) {
-                stopRobot("No next B found after A: final tile OR missed route. Verify before continuing.");
-            } else {
-                pivot(-1, Config::COLOR_TURN_SPEED);
-            }
-            break;
-
-        case ColorPhase::SETTLE_ON_SECOND:
-            drive(0, 0);
-            if (phaseTime < Config::COLOR_SETTLE_MS) break;
-            // Require B again while stopped, so a fleeting edge is not accepted.
-            if (fresh && confirmedColor(sample, colorState.second)) {
-                setColorPhase(ColorPhase::DRIVE_TO_FIRST, now);
-            } else if (phaseTime >= Config::COLOR_SETTLE_MS + Config::COLOR_SENSOR_TIMEOUT_MS) {
-                stopRobot("B disappeared after turning. Reduce turn speed or fix sensor geometry.");
-            }
-            break;
+    Console.printf("First RGB proportions: %.2f %.2f %.2f\n",
+                   firstColor.r, firstColor.g, firstColor.b);
+    if (!driveToColor(nullptr, secondColor, STRAIGHT_TIMEOUT_MS)) {
+        if (!cancelled) Console.printf("Second color not found. Stopped.\n");
+        return;
     }
+    Console.printf("Second RGB proportions: %.2f %.2f %.2f\n",
+                   secondColor.r, secondColor.g, secondColor.b);
+    while (keepRunning()) {
+        Color found;
+        // We are on B now, so the next A is a NEW first-color marker.
+        if (!driveToColor(&firstColor, found, STRAIGHT_TIMEOUT_MS)) {
+            if (!cancelled) Console.printf("Next first-color tile not found. Stopped.\n");
+            break;
+        }
+        if (!moveFor(COLOR_SPEED, COLOR_SPEED, CENTER_MS)) break;
+        if (!findNextDirection()) {
+            if (!cancelled) Console.printf("No left/right continuation: final A tile OR failed search.\n");
+            break;
+        }
+        // Successful search ends on B; repeat until we reach the next A marker.
+    }
+    stopRobot();
 }
 
-ControllerPtr findController() {
-    // Retain the same controller until it disconnects; do not swap mid-run.
-    if (activeController && activeController->isConnected() && activeController->isGamepad()) return activeController;
-    for (auto controller : myControllers) {
-        if (controller && controller->isConnected() && controller->isGamepad()) return controller;
-    }
-    return nullptr;
-}
-
-void printTelemetry(uint32_t now) {
-    if (!Config::TELEMETRY || !elapsed(now, lastTelemetry, Config::TELEMETRY_INTERVAL_MS)) return;
-    lastTelemetry = now;
-    if (mode == Mode::LINE) {
-        Console.printf("QTR L=%u R=%u; drive=%d,%d\n", lineState.values[0], lineState.values[1], leftCommand, rightCommand);
-    } else if (mode == Mode::COLOR) {
-        Console.printf("RGB/sum %.3f %.3f %.3f clear=%d usable=%d; drive=%d,%d\n",
-                       colorState.latest.r,
-                       colorState.latest.g,
-                       colorState.latest.b,
-                       colorState.latest.clear,
-                       colorState.latest.valid,
-                       leftCommand, rightCommand);
-    }
+// ---------- MANUAL DRIVING AND BUTTONS ----------
+int stickSpeed(int raw) {
+    if (abs(raw) < STICK_DEADZONE) return 0;
+    return raw * MANUAL_SPEED / 512;
 }
 
 void setup() {
     Serial.begin(115200);
-    const uint8_t motorPins[] = {Config::LEFT_IN1, Config::LEFT_IN2, Config::RIGHT_IN1, Config::RIGHT_IN2};
-    for (uint8_t pin : motorPins) {
-        pinMode(pin, OUTPUT);
-        digitalWrite(pin, LOW);
-    }
-    scoop.setPeriodHertz(50);
-    scoop.attach(Config::SERVO_PIN);
-    scoop.write(Config::SCOOP_START);
-    for (uint8_t i = 0; i < 4; ++i) {
-        motorPwm[i].attachPin(motorPins[i], Config::MOTOR_PWM_HZ, 8);
-        motorPwm[i].writeScaled(0);
-    }
-    motorsReady = motorPwm[0].attached() && motorPwm[1].attached() && motorPwm[2].attached() && motorPwm[3].attached();
-    drive(0, 0);
-    esp_log_level_set("gpio", ESP_LOG_ERROR);
-    BP32.setup(&onConnectedController, &onDisconnectedController);
-    // Keep existing pairing keys and the allowlist installed by your starter
-    // callbacks. Do not erase pairing on every boot.
-    uni_bt_allowlist_set_enabled(true);
-
-    colorBus.begin(Config::SDA_PIN, Config::SCL_PIN, 100000);
-    colorBus.setTimeOut(20);  // Bound I2C bus waits if a wire comes loose.
-    apds.setInterruptPin(Config::COLOR_INT_PIN);
-    colorReady = apds.begin();
-    Console.printf("APDS9960: %s\n", colorReady ? "ready" : "FAILED (manual/line still available)");
-
-    // Pololu's analog QTR library assumes 10-bit raw ADC values (0..1023).
-    // No SharpIR sensors are read, so keep this consistent throughout the run.
-    analogReadResolution(10);
+    pinMode(LEFT_IN1, OUTPUT);
+    pinMode(LEFT_IN2, OUTPUT);
+    pinMode(RIGHT_IN1, OUTPUT);
+    pinMode(RIGHT_IN2, OUTPUT);
+    stopRobot();
+    analogReadResolution(10);  // QTR analog library expects 0..1023.
     qtr.setTypeAnalog();
-    qtr.setSensorPins(Config::LINE_PINS, Config::LINE_COUNT);
-    qtr.setSamplesPerSensor(4);
-    if (!motorsReady) {
-        stopRobot("Motor PWM initialization failed.");
-        return;
-    }
-    beginCalibration(millis());
+    qtr.setSensorPins(LINE_PINS, LINE_COUNT);
+    colorWire.begin(21, 22, 100000);
+    colorWire.setTimeOut(50);  // Limit a stalled I2C transaction.
+    colorReady = colorSensor.begin();
+    if (!colorReady) Console.printf("APDS-9960 not found; color mode unavailable.\n");
+    BP32.setup(&onConnectedController, &onDisconnectedController);
+    // Use the starter's allowlist_add command to allow YOUR controller first.
+    uni_bt_allowlist_set_enabled(true);
+    Console.printf("A: color | X: line | Y: calibrate | B: stop | hold L1 + stick: drive\n");
 }
 
 void loop() {
-    // Each pass does a small amount of work. There are no blocking motion or
-    // search loops: controller updates continue during every autonomous phase.
-    BP32.update();
-    uint32_t now = millis();
-    ControllerPtr controller = findController();
-    if (controller != activeController) {
-        bool hadController = activeController != nullptr;
-        activeController = controller;
-        previousA = controller && controller->a();
-        previousX = controller && controller->x();
-        previousY = controller && controller->y();
-        lastControllerReport = now;
-        manualArmed = false;
-        // Connecting during stationary calibration is fine; disconnecting
-        // during a moving mode always cancels that run, even if another pad exists.
-        if (mode != Mode::CALIBRATING || hadController) {
-            stopRobot(controller ? "Controller changed. Release buttons; B=manual." : "Controller disconnected. Reconnect, then B=manual.");
-        }
-    }
-
-    if (!motorsReady) {
-        drive(0, 0);
-        delay(5);
-        return;
-    }
-    // isConnected() can remain true for seconds after the radio goes out of
-    // range. Track new reports from THIS controller, not BP32.update() globally.
-    if (controller && controller->hasData()) lastControllerReport = now;
-    if (controller && elapsed(now, lastControllerReport, Config::CONTROLLER_TIMEOUT_MS)) {
-        if (mode == Mode::CALIBRATING) {
-            runCalibration(now);
-        } else if (mode != Mode::STOPPED) {
-            stopRobot("Controller reports timed out. Restore link, then restart.");
-        }
-        delay(5);
-        return;
-    }
-    if (controller) {
-        bool a = controller->a(), x = controller->x(), y = controller->y();
-        if (controller->b()) {
-            // B outranks every other button and never moves the wheels or scoop.
-            if (mode != Mode::MANUAL) Console.printf("MANUAL: center sticks after releasing B.\n");
-            mode = Mode::MANUAL;
-            manualArmed = false;
-            drive(0, 0);
-            previousA = a;
-            previousX = x;
-            previousY = y;
-            delay(5);
-            return;
-        }
-        if (y && !previousY) {
-            beginCalibration(now);
-        } else if (mode != Mode::CALIBRATING && a && !previousA) {
-            beginLine(now);
-        } else if (mode != Mode::CALIBRATING && x && !previousX) {
-            beginColor(now);
-        }
-        previousA = a;
-        previousX = x;
-        previousY = y;
-    }
-    if (mode == Mode::CALIBRATING) {
-        runCalibration(now);  // Can calibrate without a controller; motors off.
-    } else if (!controller) {
-        if (mode != Mode::STOPPED) stopRobot("No controller connected.");
-        drive(0, 0);
-    } else if ((mode == Mode::LINE || mode == Mode::COLOR) &&
-               elapsed(now, autonomousStarted, Config::AUTONOMOUS_TIMEOUT_MS)) {
-        stopRobot("Autonomous runtime limit reached.");
+    static bool buttonsReleased = false;
+    if (!updateController()) {
+        stopRobot();
+        buttonsReleased = false;
+    } else if (controller->b()) {
+        stopRobot();
+        buttonsReleased = false;
+    } else if (buttonsReleased && (controller->a() || controller->x() || controller->y())) {
+        stopRobot();
+        cancelled = false;
+        buttonsReleased = false;  // Holding a button must not restart a task.
+        if (controller->y())
+            calibrateLine();
+        else if (controller->x())
+            followLine();
+        else
+            followColors();
+        stopRobot();  // Completion returns to stopped manual mode.
     } else {
-        switch (mode) {
-            case Mode::MANUAL:
-                runManual(controller);
-                break;
-            case Mode::LINE:
-                runLine(now);
-                break;
-            case Mode::COLOR:
-                runColor(now);
-                break;
-            default:
-                drive(0, 0);
-                break;
-        }
+        bool faceButtonDown = controller->a() || controller->x() || controller->y();
+        if (!faceButtonDown) buttonsReleased = true;
+        if (controller->l1() && !faceButtonDown && buttonsReleased) {
+            int forward = -stickSpeed(controller->axisY());
+            int turn = stickSpeed(controller->axisX());
+            // Scale both together if the mix exceeds the selected maximum speed.
+            int left = forward + turn, right = forward - turn;
+            int peak = max(abs(left), abs(right));
+            if (peak > MANUAL_SPEED) {
+                left = left * MANUAL_SPEED / peak;
+                right = right * MANUAL_SPEED / peak;
+            }
+            drive(left, right);
+        } else
+            stopRobot();
     }
-    printTelemetry(now);
-    delay(5);  // Yield to Bluetooth/RTOS tasks, including with no controller.
+    delay(5);  // Yield CPU time to Bluetooth/background work.
 }
