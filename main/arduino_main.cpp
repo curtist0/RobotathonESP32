@@ -8,18 +8,16 @@
 // Motor 1 is left, motor 2 is right. Motors use on/off control as in your original.
 // This basic follower can miss sharp corners; it does not measure a 90-degree turn.
 
+#include "sdkconfig.h"
 #include <Arduino.h>
+#include <Bluepad32.h>
+#include <uni.h>
+#include <QTRSensors.h>
+#include "controller_callbacks.h"
+#include <Wire.h>
 #include <Arduino_APDS9960.h>
 #include <ESP32SharpIR.h>
 #include <ESP32Servo.h>
-#include <ESP32SharpIR.h>
-#include <QTRSensors.h>
-#include <Wire.h>
-#include <bits/stdc++.h>
-#include <uni.h>
-
-#include "controller_callbacks.h"
-#include "sdkconfig.h"
 
 #define Motor1Pin1 18
 #define Motor1Pin2 5
