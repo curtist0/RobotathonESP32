@@ -190,7 +190,6 @@ void colorRun() {
         getColor(); // Updates r, g, b globally
     }
     driveStop();
-    autoRun = false;
     return;
 }
 
@@ -258,6 +257,7 @@ void loop() {
         }
     }
     if (autoRun) {
-        colorRun();                                 // runs even between controller packets
+        colorRun(); 
+        autoRun = false;                                // runs even between controller packets
     }
 }
