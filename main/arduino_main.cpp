@@ -244,32 +244,31 @@ void loop() {
         if (myController && myController->isConnected() && myController->hasData()) {
             moveNoob(myController);
             if (myController->a()) {
-                Console.print("pressed A");
                 colorRun2(myController);
             }  
-            if (myController->b()) {
-                if (!calibrated) {
-                    // 1st press: calibrate. Sweep the sensors over the line and the floor while this runs.
-                    Console.print("Calibrating...\n");
-                    for (uint8_t i = 0; i < 250; i++) {
-                        qtr.calibrate();
-                        delay(20);
-                    }
-                    calibrated = true;
-                }
-                bool test = true;
-                while (test) {
-                    BP32.update();
-                    qtr.readLineBlack(sensors); // Get calibrated sensor values returned into sensors[]
-                    Console.printf("S1: %d S2: %d\n", sensors[0], sensors[1]);
-                    if (myController->x()) {
-                        test = false;
-                    }
-                }
-            }
-            if (myController-> y() && calibrated) {
-                monkey(myController);
-            }
+            // if (myController->b()) {
+            //     if (!calibrated) {
+            //         // 1st press: calibrate. Sweep the sensors over the line and the floor while this runs.
+            //         Console.print("Calibrating...\n");
+            //         for (uint8_t i = 0; i < 250; i++) {
+            //             qtr.calibrate();
+            //             delay(20);
+            //         }
+            //         calibrated = true;
+            //     }
+            //     bool test = true;
+            //     while (test) {
+            //         BP32.update();
+            //         qtr.readLineBlack(sensors); // Get calibrated sensor values returned into sensors[]
+            //         Console.printf("S1: %d S2: %d\n", sensors[0], sensors[1]);
+            //         if (myController->x()) {
+            //             test = false;
+            //         }
+            //     }
+            // }
+            // if (myController-> y() && calibrated) {
+            //     monkey(myController);
+            // }
             if (myController->x()) {
                 digitalWrite(Motor1Pin1, LOW);
                 digitalWrite(Motor2Pin1, LOW);
