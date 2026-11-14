@@ -15,7 +15,6 @@
 #include "controller_callbacks.h"
 #include "sdkconfig.h"
 
-
 #define APDS9960_INT 0
 #define I2C_SDA 21
 #define I2C_SCL 22
