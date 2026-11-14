@@ -1,5 +1,5 @@
-#include <Bluepad32.h>
 #include <Arduino.h>
+#include <Bluepad32.h>
 
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
