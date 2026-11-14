@@ -4,14 +4,13 @@ ROBOTATHON PEOPLE START IN arduino_main.cpp!!! This file just initializes the Ar
 
 */
 
-
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2019 Ricardo Quesada
 // http://retro.moe/unijoysticle2
 
-#include "sdkconfig.h"
-
 #include <stddef.h>
+
+#include "sdkconfig.h"
 
 // BTstack related
 #include <btstack_port_esp32.h>
