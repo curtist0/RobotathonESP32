@@ -89,27 +89,27 @@ void getColor() {
 void moveNoob(Controller* controller) {
     if(controller && controller -> isConnected()) {
         if(controller -> axisRX() > 0) {
-            digitalWrite(Motor1Pin1, 10);
+            digitalWrite(Motor1Pin1, HIGH);
             digitalWrite(Motor1Pin2, LOW);
             digitalWrite(Motor2Pin1, LOW);
-            digitalWrite(Motor2Pin2, 10);
+            digitalWrite(Motor2Pin2, HIGH);
         }
         if(controller -> axisRX() < 0) {
             digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor1Pin2, 10);
-            digitalWrite(Motor2Pin1, 10);
+            digitalWrite(Motor1Pin2, HIGH);
+            digitalWrite(Motor2Pin1, HIGH);
             digitalWrite(Motor2Pin2, LOW);
         }
         if(controller -> axisY() > 0) {
             digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor1Pin2, 10);
+            digitalWrite(Motor1Pin2, HIGH);
             digitalWrite(Motor2Pin1, LOW);
-            digitalWrite(Motor2Pin2, 10);
+            digitalWrite(Motor2Pin2, HIGH);
         }
         if(controller -> axisY() < 0) {
-            digitalWrite(Motor1Pin1, 10);
+            digitalWrite(Motor1Pin1, HIGH);
             digitalWrite(Motor1Pin2, LOW);
-            digitalWrite(Motor2Pin1, 10);
+            digitalWrite(Motor2Pin1, HIGH);
             digitalWrite(Motor2Pin2, LOW);
         }
 
@@ -167,8 +167,8 @@ void monkey(ControllerPtr gp) {
         }
         qtr.readLineBlack(sensors); // Get calibrated sensor values returned in the sensors array
         int leftSensor = sensors[1];
-        int middle1 = sensors[3];
-        int middle2 = sensors[2];
+        // int middle1 = sensors[3];
+        // int middle2 = sensors[2];
         int rightSensor = sensors[0];
         int threshold = 750; // fix later
         if (leftSensor > threshold && rightSensor > threshold) {
@@ -195,11 +195,6 @@ void monkey(ControllerPtr gp) {
             driveStop();
             break;
         }
-
-        Serial.print(sensors[0]);
-        Serial.print(" ");
-        Serial.println(sensors[1]);
-
         delay(250);
     }
 }
@@ -261,6 +256,15 @@ void loop() {
                         delay(20);
                     }
                     calibrated = true;
+                }
+                bool test = true;
+                while (test) {
+                    BP32.update();
+                    qtr.readLineBlack(sensors); // Get calibrated sensor values returned into sensors[]
+                    Console.printf("S1: %d S2: %d\n", sensors[0], sensors[1]);
+                    if (myController->x()) {
+                        test = false;
+                    }
                 }
             }
             if (myController-> y() && calibrated) {
