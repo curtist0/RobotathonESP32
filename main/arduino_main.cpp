@@ -25,22 +25,19 @@
 #define Motor2Pin2  16  // Control pin 4
 
 
+
+
 extern ControllerPtr myControllers[BP32_MAX_GAMEPADS]; // BP32 library allows for up to 4 concurrent controller connections, but we only need 1
-
-
 TwoWire I2C_0 = TwoWire(0);
 APDS9960 apds = APDS9960(I2C_0, APDS9960_INT);
 Servo Scoop;
 QTRSensors qtr;
 uint16_t sensors[2];
-
+int r, g, b, a; 
 ESP32SharpIR FrontSensor(ESP32SharpIR::GP2Y0A21YK0F, 12);
 ESP32SharpIR LeftSensor(ESP32SharpIR::GP2Y0A21YK0F, 14);
 ESP32SharpIR RightSensor(ESP32SharpIR::GP2Y0A21YK0F, 27);
 
-String ogColor;
-bool color = false;
-bool GO = false;
 
 void dumpGamepad(ControllerPtr ctl) {
     Console.printf(
@@ -102,19 +99,13 @@ void setup() {
     
 }
 
-void scoopServo(Controller* controller){
-    if(controller && controller -> isConnected()){
-        if(controller -> r1()){
-            Scoop.write(0);
-        }
-        if(controller -> l1()){
-            Scoop.write(180);
-        }
-    }
+void getColor() {
+    while (!apds.colorAvailable()) { delay(5); } // Wait until color is read from the sensor 
+    apds.readColor(r, g, b, a);
+    Console.printf("RED: %d GREEN: %d BLUE: %d AMBIENT: %d\n", r, g, b, a);
+    delay(100);
 }
-
 void moveNoob(Controller* controller) {
-    Console.printf("CONTROLLER IS MOVING");
     if(controller && controller -> isConnected()) {
         if(controller -> axisRX() > 0) {
             digitalWrite(Motor1Pin1, HIGH);
@@ -168,117 +159,79 @@ void driveForward(){
     digitalWrite(Motor2Pin2, LOW);
 }
 
-//monkey see monkey follow line
+// //monkey see monkey follow line
 void monkey(ControllerPtr gp) {
     if(gp -> y()) {
         return;
     }
+    bool go = true;
+    while (go) {
+        qtr.readLineBlack(sensors); // Get calibrated sensor values returned in the sensors array
+        int leftSensor = sensors[0];
+        int rightSensor = sensors[1];
+        int threshold = 750; // fix later
 
-    qtr.readLineBlack(sensors); // Get calibrated sensor values returned in the sensors array
-    int leftSensor = sensors[0];
-    int rightSensor = sensors[1];
-    int threshold = 500; // fix later
+        if (leftSensor > threshold && rightSensor > threshold) {
+            // Move forward
+            digitalWrite(Motor1Pin1, HIGH);
+            digitalWrite(Motor1Pin2, LOW);
+            digitalWrite(Motor2Pin1, HIGH);
+            digitalWrite(Motor2Pin2, LOW);
+        } else if (leftSensor > threshold && rightSensor <= threshold) {
+            // Turn right
+            digitalWrite(Motor1Pin1, LOW);
+            digitalWrite(Motor1Pin2, HIGH);
+            digitalWrite(Motor2Pin1, HIGH);
+            digitalWrite(Motor2Pin2, LOW);
+        } else if (leftSensor <= threshold && rightSensor > threshold) {
+            // Turn left
+            digitalWrite(Motor1Pin1, HIGH);
+            digitalWrite(Motor1Pin2, LOW);
+            digitalWrite(Motor2Pin1, LOW);
+            digitalWrite(Motor2Pin2, HIGH);
+        } else {
+            go = false;
+            // Stop
+            digitalWrite(Motor1Pin1, LOW);
+            digitalWrite(Motor1Pin2, LOW);
+            digitalWrite(Motor2Pin1, LOW);
+            digitalWrite(Motor2Pin2, LOW);
+        }
 
-    if (leftSensor < threshold && rightSensor < threshold) {
-        // Move forward
-        digitalWrite(Motor1Pin1, LOW);
-        digitalWrite(Motor1Pin2, HIGH);
-        digitalWrite(Motor2Pin1, LOW);
-        digitalWrite(Motor2Pin2, HIGH);
-    } else if (leftSensor < threshold && rightSensor >= threshold) {
-        // Turn right
-        digitalWrite(Motor1Pin1, LOW);
-        digitalWrite(Motor1Pin2, HIGH);
-        digitalWrite(Motor2Pin1, HIGH);
-        digitalWrite(Motor2Pin2, LOW);
-    } else if (leftSensor >= threshold && rightSensor < threshold) {
-        // Turn left
-        digitalWrite(Motor1Pin1, HIGH);
-        digitalWrite(Motor1Pin2, LOW);
-        digitalWrite(Motor2Pin1, LOW);
-        digitalWrite(Motor2Pin2, HIGH);
-    } else {
-        // Stop
-        digitalWrite(Motor1Pin1, LOW);
-        digitalWrite(Motor1Pin2, LOW);
-        digitalWrite(Motor2Pin1, LOW);
-        digitalWrite(Motor2Pin2, LOW);
+        Serial.print(sensors[0]);
+        Serial.print(" ");
+        Serial.println(sensors[1]);
+
+        delay(250);
     }
-
-    Serial.print(sensors[0]);
-    Serial.print(" ");
-    Serial.println(sensors[1]);
-
-    delay(250);
-}
-
-String colorRun(ControllerPtr gp) {
-    int r, g, b, a;
-
-    //break statement
-    if(gp -> y()) {
-        return "";
-    }
-    // Wait until color is read from the sensor 
-    while (!apds.colorAvailable()) { delay(5); }
-    apds.readColor(r, g, b, a);
-
-    String currentColor = "";
-    if (r > g && r > b) {
-        currentColor = "Red";
-    } else if (g > r && g > b) {
-        currentColor = "Green";
-    } else if (b > r && b > g) {
-        currentColor = "Blue";
-    }
-
-    if(color == false) {
-        ogColor = currentColor;
-        color = true;
-    }
-    return currentColor;
 }
 
 
+void colorRun2() {
+    getColor();
+    int startR = r;
+    int startG = g;
+    int startB = b;
+    Console.print("COLORRUN should be RUNNING");
+    driveForward();
+    // Step 3: Keep reading colors over and over as long as we are STILL on the starting color
+    while (abs(r - startR) < 7 && abs(g - startG) < 7 && abs(b - startB) < 7) {
+        getColor(); // Updates r, g, b globally
+        Console.print("checking for dupe color");
+    }
 
-void line(Controller* controller){
-    qtr.readLineBlack(sensors); 
-    int sensorL = sensors[0];
-    int sensorR = sensors[1];
-    int thres = 750;
-    
-    Console.printf("S1: %d S2: %d\n", sensors[0], sensors[1]);
-    delay(250);
-    if (sensorL > thres && sensorR > thres){
-        digitalWrite(Motor1Pin1, HIGH);
-        digitalWrite(Motor1Pin2, LOW);
-        digitalWrite(Motor2Pin1, HIGH);            
-        digitalWrite(Motor2Pin2, LOW);
-        Console.printf("forward");
+    // Step 4: We left the first color! Now keep reading colors until we MATCH the starting color again
+    while (abs(r - startR) >= 7 || abs(g - startG) >= 7 || abs(b - startB) >= 7) {
+        Console.print("looking for color");
+        getColor(); // Updates r, g, b globally
     }
-    else if(sensorL <= thres && sensorR > thres){            
-        digitalWrite(Motor1Pin1, HIGH);
-        digitalWrite(Motor1Pin2, LOW);
-        digitalWrite(Motor2Pin1, LOW);
-        digitalWrite(Motor2Pin2, HIGH);
-        Console.printf("right");
-    }
-    else if(sensorL > thres && sensorR <= thres){
-        digitalWrite(Motor1Pin1, LOW);
-        digitalWrite(Motor1Pin2, HIGH);
-        digitalWrite(Motor2Pin1, HIGH);
-        digitalWrite(Motor2Pin2, LOW);            
-        Console.printf("left");
-     }
-    else{
-        digitalWrite(Motor1Pin1, LOW);              
-        digitalWrite(Motor2Pin1, LOW);
-        digitalWrite(Motor1Pin2, LOW);
-        digitalWrite(Motor2Pin2, LOW);
-        Console.printf("stop ");
-    }
-    delay(250);
+    Console.print("found a color match!");
+    Console.printf("StartR: %d StartG: %d StartB: %d\n", startR, startG, startB);
+    driveStop();
+    autoRun = false;
+    return;
 }
+
 
 void loop() {
     vTaskDelay(1);
@@ -287,32 +240,23 @@ void loop() {
     for (auto myController : myControllers) {
         if (myController && myController->isConnected() && myController->hasData()) {
             moveNoob(myController);
-            if (myController->a()) {  
-                if(!GO) {
-                    colorRun(myController);
-                    GO = true;
-                }
-                while(color == true){
-                    BP32.update();
-                    //drive forward
-                    digitalWrite(Motor1Pin1, HIGH);
-                    digitalWrite(Motor1Pin2, LOW);
-                    digitalWrite(Motor2Pin1, LOW);
-                    digitalWrite(Motor2Pin2, HIGH);
-                    //delay checking for color
-                    delay(1000);
-                    //check for color
-                    if(ogColor != colorRun(myController)){
-                        driveStop();
-                        //reset flag to allow read
-                        color = false;
-                        GO = false;
-                        break;
-                    }
-                }
+            if (myController->a()) {
+                Console.print("pressed A");
+                colorRun2();
             }
             if (myController->b()) { 
-                monkey(myController);
+                lineSensor();
+                Console.print("Reaches the prints");
+                qtr.readLineBlack(sensors); // Get calibrated sensor values returned into sensors[]
+                Console.printf("S1: %d S2: %d\n", sensors[0], sensors[1]);
+                delay(250);
+                //monkey(myController);
+            }
+            if (myController->x()) {
+                digitalWrite(Motor1Pin1, LOW);
+                digitalWrite(Motor2Pin1, LOW);
+                digitalWrite(Motor1Pin2, LOW);
+                digitalWrite(Motor2Pin2, LOW);
             }
         }
     }
