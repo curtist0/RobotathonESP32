@@ -205,7 +205,7 @@ void monkey(ControllerPtr gp) {
 }
 
 
-void colorRun2() {
+void colorRun2(ControllerPtr gp) {
     getColor();
     int startR = r;
     int startG = g;
@@ -216,12 +216,22 @@ void colorRun2() {
     while (abs(r - startR) < 7 && abs(g - startG) < 7 && abs(b - startB) < 7) {
         getColor(); // Updates r, g, b globally
         Console.print("checking for dupe color");
+        BP32.update();
+        if (gp->x()) {
+            driveStop();
+            return;
+        }
     }
 
     // Step 4: We left the first color! Now keep reading colors until we MATCH the starting color again
     while (abs(r - startR) >= 7 || abs(g - startG) >= 7 || abs(b - startB) >= 7) {
         Console.print("looking for color");
         getColor(); // Updates r, g, b globally
+        BP32.update();
+        if (gp->x()) {
+            driveStop();
+            return;
+        }
     }
     Console.print("found a color match!");
     Console.printf("StartR: %d StartG: %d StartB: %d\n", startR, startG, startB);
@@ -240,7 +250,7 @@ void loop() {
             moveNoob(myController);
             if (myController->a()) {
                 Console.print("pressed A");
-                colorRun2();
+                colorRun2(myController);
             }  
             if (myController->b()) {
                 if (!calibrated) {
