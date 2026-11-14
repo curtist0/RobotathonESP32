@@ -8,16 +8,18 @@
 // Motor 1 is left, motor 2 is right. Motors use on/off control as in your original.
 // This basic follower can miss sharp corners; it does not measure a 90-degree turn.
 
-#include "sdkconfig.h"
 #include <Arduino.h>
-#include <Bluepad32.h>
-#include <uni.h>
-#include <QTRSensors.h>
-#include "controller_callbacks.h"
-#include <Wire.h>
 #include <Arduino_APDS9960.h>
-#include <ESP32SharpIR.h>
+#include <Bluepad32.h>
 #include <ESP32Servo.h>
+#include <ESP32SharpIR.h>
+#include <QTRSensors.h>
+#include <Wire.h>
+#include <uni.h>
+
+#include "controller_callbacks.h"
+#include "sdkconfig.h"
+
 
 #define Motor1Pin1 18
 #define Motor1Pin2 5
@@ -38,9 +40,9 @@ ESP32SharpIR RightSensor(ESP32SharpIR::GP2Y0A21YK0F, 27);
 enum Mode { MANUAL, LINE, COLOR, STOPPED };
 Mode mode = MANUAL;
 bool previousA = false, previousX = false;
-const int LINE_THRESHOLD = 750; // Calibrated values: 0 = white, 1000 = black.
-const uint32_t SEARCH_TIME = 1000; // Maximum time searching without seeing black.
-int lastTurn = 0; // -1 = left, 1 = right, 0 = no direction known yet.
+const int LINE_THRESHOLD = 750;     // Calibrated values: 0 = white, 1000 = black.
+const uint32_t SEARCH_TIME = 1000;  // Maximum time searching without seeing black.
+int lastTurn = 0;                   // -1 = left, 1 = right, 0 = no direction known yet.
 uint32_t lastLineSeen = 0;
 bool colorReady = false, haveStartColor = false, leftStartColor = false;
 int startR = 0, startG = 0, startB = 0;
@@ -58,17 +60,22 @@ void driveStop() { drive(0, 0); }
 void driveForward() { drive(1, 1); }
 
 void moveNoob(Controller* controller) {
-    if (controller->axisY() < -50) driveForward();
-    else if (controller->axisY() > 50) drive(-1, -1);
-    else if (controller->axisRX() > 50) drive(1, -1);
-    else if (controller->axisRX() < -50) drive(-1, 1);
-    else driveStop();
+    if (controller->axisY() < -50)
+        driveForward();
+    else if (controller->axisY() > 50)
+        drive(-1, -1);
+    else if (controller->axisRX() > 50)
+        drive(1, -1);
+    else if (controller->axisRX() < -50)
+        drive(-1, 1);
+    else
+        driveStop();
 }
 
 void line() {
-    analogReadResolution(10); // Match the QTR library's analog reading range.
+    analogReadResolution(10);  // Match the QTR library's analog reading range.
     qtr.readCalibrated(sensors);
-    analogReadResolution(12); // Restore the usual ESP32 setting for other sensors.
+    analogReadResolution(12);  // Restore the usual ESP32 setting for other sensors.
 
     bool leftBlack = sensors[0] > LINE_THRESHOLD;
     bool rightBlack = sensors[1] > LINE_THRESHOLD;
@@ -79,15 +86,15 @@ void line() {
         driveForward();
     } else if (leftBlack) {
         lastTurn = -1;
-        drive(-1, 1); // Turn left.
+        drive(-1, 1);  // Turn left.
     } else if (rightBlack) {
         lastTurn = 1;
-        drive(1, -1); // Turn right.
+        drive(1, -1);  // Turn right.
     } else if (uint32_t(millis() - lastLineSeen) < SEARCH_TIME && lastTurn != 0) {
-        drive(lastTurn, -lastTurn); // Keep turning toward the last-seen line.
+        drive(lastTurn, -lastTurn);  // Keep turning toward the last-seen line.
     } else {
         driveStop();
-        mode = STOPPED; // Press A again to retry, or B for manual control.
+        mode = STOPPED;  // Press A again to retry, or B for manual control.
     }
 }
 
@@ -110,7 +117,8 @@ void colorRun() {
         haveStartColor = true;
     } else {
         bool sameColor = abs(r - startR) < 7 && abs(g - startG) < 7 && abs(b - startB) < 7;
-        if (!sameColor) leftStartColor = true;
+        if (!sameColor)
+            leftStartColor = true;
         else if (leftStartColor) {
             driveStop();
             mode = STOPPED;
@@ -175,7 +183,7 @@ void loop() {
 
     if (ctl->b()) {
         mode = MANUAL;
-        driveStop(); // Holding B stops even when a joystick is pushed.
+        driveStop();  // Holding B stops even when a joystick is pushed.
     } else {
         if (aPressed && !previousA) {
             mode = LINE;
@@ -188,10 +196,14 @@ void loop() {
             lastColorReading = millis();
         }
 
-        if (mode == LINE) line();
-        else if (mode == COLOR) colorRun();
-        else if (mode == MANUAL) moveNoob(ctl);
-        else driveStop();
+        if (mode == LINE)
+            line();
+        else if (mode == COLOR)
+            colorRun();
+        else if (mode == MANUAL)
+            moveNoob(ctl);
+        else
+            driveStop();
     }
     previousA = aPressed;
     previousX = xPressed;
