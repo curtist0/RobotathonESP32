@@ -89,27 +89,27 @@ void getColor() {
 void moveNoob(Controller* controller) {
     if(controller && controller -> isConnected()) {
         if(controller -> axisRX() > 0) {
-            digitalWrite(Motor1Pin1, HIGH);
+            digitalWrite(Motor1Pin1, 10);
             digitalWrite(Motor1Pin2, LOW);
             digitalWrite(Motor2Pin1, LOW);
-            digitalWrite(Motor2Pin2, HIGH);
+            digitalWrite(Motor2Pin2, 10);
         }
         if(controller -> axisRX() < 0) {
             digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor1Pin2, HIGH);
-            digitalWrite(Motor2Pin1, HIGH);
+            digitalWrite(Motor1Pin2, 10);
+            digitalWrite(Motor2Pin1, 10);
             digitalWrite(Motor2Pin2, LOW);
         }
         if(controller -> axisY() > 0) {
             digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor1Pin2, HIGH);
+            digitalWrite(Motor1Pin2, 10);
             digitalWrite(Motor2Pin1, LOW);
-            digitalWrite(Motor2Pin2, HIGH);
+            digitalWrite(Motor2Pin2, 10);
         }
         if(controller -> axisY() < 0) {
-            digitalWrite(Motor1Pin1, HIGH);
+            digitalWrite(Motor1Pin1, 10);
             digitalWrite(Motor1Pin2, LOW);
-            digitalWrite(Motor2Pin1, HIGH);
+            digitalWrite(Motor2Pin1, 10);
             digitalWrite(Motor2Pin2, LOW);
         }
 
@@ -134,15 +134,15 @@ void driveStop() {
 }
 
 void driveForward(){
-    digitalWrite(Motor1Pin1, HIGH);
+    digitalWrite(Motor1Pin1, 10);
     digitalWrite(Motor1Pin2, LOW);
-    digitalWrite(Motor2Pin1, HIGH);
+    digitalWrite(Motor2Pin1, 10);
     digitalWrite(Motor2Pin2, LOW);
 }
 
 void driveBackward() {
-    digitalWrite(Motor1Pin1, LOW);  digitalWrite(Motor1Pin2, HIGH);
-    digitalWrite(Motor2Pin1, LOW);  digitalWrite(Motor2Pin2, HIGH);
+    digitalWrite(Motor1Pin1, LOW);  digitalWrite(Motor1Pin2, 10);
+    digitalWrite(Motor2Pin1, LOW);  digitalWrite(Motor2Pin2, 10);
 }
 
 void posCorrection() {
@@ -150,7 +150,7 @@ void posCorrection() {
     delay(50);          // pause, lets momentum die
 
     driveBackward();    // back up a couple steps
-    delay(400);         // tune: how far to reverse
+    delay(250);         // tune: how far to reverse
 
     driveStop();
     delay(50);  
@@ -178,16 +178,16 @@ void monkey(ControllerPtr gp) {
         } else if (leftSensor > threshold && rightSensor <= threshold) {
             // Turn right
             if (!corrected) { posCorrection(); corrected = true; }
-            digitalWrite(Motor1Pin1, HIGH);
+            digitalWrite(Motor1Pin1, 10);
             digitalWrite(Motor1Pin2, LOW);
             digitalWrite(Motor2Pin1, LOW);
-            digitalWrite(Motor2Pin2, HIGH);
+            digitalWrite(Motor2Pin2, 10);
         } else if (leftSensor <= threshold && rightSensor > threshold) {
             // Turn left
             if (!corrected) { posCorrection(); corrected = true; }
             digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor1Pin2, HIGH);
-            digitalWrite(Motor2Pin1, HIGH);
+            digitalWrite(Motor1Pin2, 10);
+            digitalWrite(Motor2Pin1, 10);
             digitalWrite(Motor2Pin2, LOW);
         } else {
             go = false;
