@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2021 Ricardo Quesada
 // http://retro.moe/unijoysticle2
-// Simple version: A = line follow, X = color run, B = stop/manual, R1/L1 = scoop.
+// A = line follow, X = color run, B = stop/manual, R1/L1 = scoop.
 // Keep your existing controller_callbacks.h and its implementation.
-// Uses TWO QTR outputs: GPIO32 = left, GPIO33 = right.
-// Both selected sensors must see black when centered on the line.
-// Motor 1 is left, motor 2 is right. Motors use on/off control as in your original.
+// GPIO32 = left QTR, GPIO33 = right QTR. Both see black when centered.
+// Motor 1 is left; motor 2 is right. Motors use on/off control.
 // This basic follower can miss sharp corners; it does not measure a 90-degree turn.
+// Responsiveness changes: one loop yield, rate-limited color polling,
+// and a shorter I2C transaction timeout. Calibration remains startup-only.
 
 #include "sdkconfig.h"
 #include <Arduino.h>
@@ -39,12 +40,15 @@ enum Mode { MANUAL, LINE, COLOR, STOPPED };
 Mode mode = MANUAL;
 bool previousA = false, previousX = false;
 const int LINE_THRESHOLD = 750; // Calibrated values: 0 = white, 1000 = black.
-const uint32_t SEARCH_TIME = 1000; // Maximum time searching without seeing black.
+const uint32_t SEARCH_TIME = 1000;
+const uint32_t COLOR_POLL_MS = 10;
+const uint16_t I2C_TIMEOUT_MS = 10;
 int lastTurn = 0; // -1 = left, 1 = right, 0 = no direction known yet.
 uint32_t lastLineSeen = 0;
 bool colorReady = false, haveStartColor = false, leftStartColor = false;
 int startR = 0, startG = 0, startB = 0;
 uint32_t lastColorReading = 0;
+uint32_t lastColorPoll = 0;
 
 // For each wheel: 1 = forward, -1 = reverse, 0 = stop.
 void drive(int left, int right) {
@@ -66,9 +70,9 @@ void moveNoob(Controller* controller) {
 }
 
 void line() {
-    analogReadResolution(10); // Match the QTR library's analog reading range.
+    analogReadResolution(10);
     qtr.readCalibrated(sensors);
-    analogReadResolution(12); // Restore the usual ESP32 setting for other sensors.
+    analogReadResolution(12);
 
     bool leftBlack = sensors[0] > LINE_THRESHOLD;
     bool rightBlack = sensors[1] > LINE_THRESHOLD;
@@ -79,20 +83,26 @@ void line() {
         driveForward();
     } else if (leftBlack) {
         lastTurn = -1;
-        drive(-1, 1); // Turn left.
+        drive(-1, 1);
     } else if (rightBlack) {
         lastTurn = 1;
-        drive(1, -1); // Turn right.
+        drive(1, -1);
     } else if (uint32_t(millis() - lastLineSeen) < SEARCH_TIME && lastTurn != 0) {
-        drive(lastTurn, -lastTurn); // Keep turning toward the last-seen line.
+        drive(lastTurn, -lastTurn);
     } else {
         driveStop();
-        mode = STOPPED; // Press A again to retry, or B for manual control.
+        mode = STOPPED;
     }
 }
 
-// The color routine takes one reading per call so B can still interrupt it.
 void colorRun() {
+    const uint32_t now = millis();
+
+    // Skip unnecessary I2C traffic while continuing to service the controller.
+    // This is a timer check, not a delay or a wait for sensor integration.
+    if (colorReady && uint32_t(now - lastColorPoll) < COLOR_POLL_MS) return;
+    lastColorPoll = now;
+
     int r, g, b, ambient;
     if (!colorReady || !apds.colorAvailable() || !apds.readColor(r, g, b, ambient)) {
         if (!colorReady || uint32_t(millis() - lastColorReading) >= 1500) {
@@ -133,6 +143,8 @@ void setup() {
 
     Scoop.attach(23);
     I2C_0.begin(21, 22, 100000);
+    // Applies per I2C transaction; a sensor call can use several transactions.
+    I2C_0.setTimeOut(I2C_TIMEOUT_MS);
     apds.setInterruptPin(0);
     colorReady = apds.begin();
     FrontSensor.setFilterRate(1.0f);
@@ -152,8 +164,11 @@ void setup() {
 }
 
 void loop() {
+    // Keep this yield on every path, including the no-controller return.
+    // One FreeRTOS tick is not necessarily one millisecond.
     vTaskDelay(1);
     BP32.update();
+
     ControllerPtr ctl = nullptr;
     for (auto controller : myControllers) {
         if (controller && controller->isConnected() && controller->isGamepad()) {
@@ -186,8 +201,10 @@ void loop() {
             mode = COLOR;
             haveStartColor = leftStartColor = false;
             lastColorReading = millis();
+            lastColorPoll = lastColorReading - COLOR_POLL_MS;
         }
 
+        // Autonomous modes must run even between new controller reports.
         if (mode == LINE) line();
         else if (mode == COLOR) colorRun();
         else if (mode == MANUAL) moveNoob(ctl);
@@ -195,5 +212,5 @@ void loop() {
     }
     previousA = aPressed;
     previousX = xPressed;
-    delay(10);
+    // No extra delay(10): the single yield above is enough.
 }
