@@ -20,7 +20,6 @@
 #include "ArduinoBluepad32.h"
 #include "ArduinoConsole.h"
 #include "controller_callbacks.h"
-#include "sdkconfig.h"
 
 #define Motor1Pin1 18
 #define Motor1Pin2 5
@@ -61,16 +60,17 @@ void driveStop() { drive(0, 0); }
 void driveForward() { drive(1, 1); }
 
 void moveNoob(Controller* controller) {
-    if (controller->axisY() < -50)
+    if (controller->axisY() < -50) {
         driveForward();
-    else if (controller->axisY() > 50)
+    } else if (controller->axisY() > 50) {
         drive(-1, -1);
-    else if (controller->axisRX() > 50)
+    } else if (controller->axisRX() > 50) {
         drive(1, -1);
-    else if (controller->axisRX() < -50)
+    } else if (controller->axisRX() < -50) {
         drive(-1, 1);
-    else
+    } else {
         driveStop();
+    }
 }
 
 void line() {
