@@ -34,6 +34,7 @@ Servo Scoop;
 QTRSensors qtr;
 uint16_t sensors[4];
 int r, g, b, a; 
+bool calibrated = false;
 ESP32SharpIR FrontSensor(ESP32SharpIR::GP2Y0A21YK0F, 12);
 ESP32SharpIR LeftSensor(ESP32SharpIR::GP2Y0A21YK0F, 14);
 ESP32SharpIR RightSensor(ESP32SharpIR::GP2Y0A21YK0F, 27);
@@ -58,23 +59,11 @@ void dumpGamepad(ControllerPtr ctl) {
     );
 }
 
-
-void lineSensor() {
-    qtr.setTypeAnalog(); 
-    qtr.setSensorPins((const uint8_t[]) {32, 33}, 2); 
-    for (uint8_t i = 0; i < 250; i++) {
-        Console.printf("calibrating %d/250\n", i); 
-        qtr.calibrate();
-        delay(20);
-    }
-}
-
 void setup() {
     BP32.setup(&onConnectedController, &onDisconnectedController);
     BP32.forgetBluetoothKeys(); 
     esp_log_level_set("gpio", ESP_LOG_ERROR); // Suppress info log spam from gpio_isr_service
     uni_bt_allowlist_set_enabled(true);
-    //Serial.begin(115200);
     pinMode(Motor1Pin1, OUTPUT);
     pinMode(Motor1Pin2, OUTPUT);
     pinMode(Motor2Pin1, OUTPUT);
@@ -86,17 +75,9 @@ void setup() {
     apds.begin();
     qtr.setTypeAnalog(); 
     qtr.setSensorPins((const uint8_t[]) {32, 33, 35, 34}, 4); // pin numbers go in the curly brackets {}, and number of sensors in use goes after
-
-    for (uint8_t i = 0; i < 250; i++) { 
-        Console.printf("calibrating %d/250\n", i); 
-        qtr.calibrate(); 
-        delay(20);
-        }
-        lineSensor();
-        FrontSensor.setFilterRate(1.0f);
-        LeftSensor.setFilterRate(1.0f);
-        RightSensor.setFilterRate(1.0f);
-    
+    FrontSensor.setFilterRate(1.0f);
+    LeftSensor.setFilterRate(1.0f);
+    RightSensor.setFilterRate(1.0f);
 }
 
 void getColor() {
@@ -159,43 +140,60 @@ void driveForward(){
     digitalWrite(Motor2Pin2, LOW);
 }
 
+void driveBackward() {
+    digitalWrite(Motor1Pin1, LOW);  digitalWrite(Motor1Pin2, HIGH);
+    digitalWrite(Motor2Pin1, LOW);  digitalWrite(Motor2Pin2, HIGH);
+}
+
+void posCorrection() {
+    driveStop();
+    delay(50);          // pause, lets momentum die
+
+    driveBackward();    // back up a couple steps
+    delay(400);         // tune: how far to reverse
+
+    driveStop();
+    delay(50);  
+}
 // //monkey see monkey follow line
 void monkey(ControllerPtr gp) {
-    if(gp -> y()) {
-        return;
-    }
     bool go = true;
+    bool corrected = false;
     while (go) {
+        BP32.update(); 
+        if (gp->x()) { 
+            driveStop();
+            break;
+        }
         qtr.readLineBlack(sensors); // Get calibrated sensor values returned in the sensors array
-        int leftSensor = sensors[0];
-        int rightSensor = sensors[1];
+        int leftSensor = sensors[1];
+        int middle1 = sensors[3];
+        int middle2 = sensors[2];
+        int rightSensor = sensors[0];
         int threshold = 750; // fix later
-
         if (leftSensor > threshold && rightSensor > threshold) {
             // Move forward
-            digitalWrite(Motor1Pin1, HIGH);
-            digitalWrite(Motor1Pin2, LOW);
-            digitalWrite(Motor2Pin1, HIGH);
-            digitalWrite(Motor2Pin2, LOW);
+            corrected = false;
+            driveForward();
         } else if (leftSensor > threshold && rightSensor <= threshold) {
             // Turn right
-            digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor1Pin2, HIGH);
-            digitalWrite(Motor2Pin1, HIGH);
-            digitalWrite(Motor2Pin2, LOW);
-        } else if (leftSensor <= threshold && rightSensor > threshold) {
-            // Turn left
+            if (!corrected) { posCorrection(); corrected = true; }
             digitalWrite(Motor1Pin1, HIGH);
             digitalWrite(Motor1Pin2, LOW);
             digitalWrite(Motor2Pin1, LOW);
             digitalWrite(Motor2Pin2, HIGH);
+        } else if (leftSensor <= threshold && rightSensor > threshold) {
+            // Turn left
+            if (!corrected) { posCorrection(); corrected = true; }
+            digitalWrite(Motor1Pin1, LOW);
+            digitalWrite(Motor1Pin2, HIGH);
+            digitalWrite(Motor2Pin1, HIGH);
+            digitalWrite(Motor2Pin2, LOW);
         } else {
             go = false;
             // Stop
-            digitalWrite(Motor1Pin1, LOW);
-            digitalWrite(Motor1Pin2, LOW);
-            digitalWrite(Motor2Pin1, LOW);
-            digitalWrite(Motor2Pin2, LOW);
+            driveStop();
+            break;
         }
 
         Serial.print(sensors[0]);
@@ -243,14 +241,20 @@ void loop() {
             if (myController->a()) {
                 Console.print("pressed A");
                 colorRun2();
+            }  
+            if (myController->b()) {
+                if (!calibrated) {
+                    // 1st press: calibrate. Sweep the sensors over the line and the floor while this runs.
+                    Console.print("Calibrating...\n");
+                    for (uint8_t i = 0; i < 250; i++) {
+                        qtr.calibrate();
+                        delay(20);
+                    }
+                    calibrated = true;
+                }
             }
-            if (myController->b()) { 
-                lineSensor();
-                Console.print("Reaches the prints");
-                qtr.readLineBlack(sensors); // Get calibrated sensor values returned into sensors[]
-                Console.printf("S1: %d S2: %d S3: %d S4: %d\n", sensors[0], sensors[1], sensors[2], sensors[3]);
-                delay(250);
-                //monkey(myController);
+            if (myController-> y() && calibrated) {
+                monkey(myController);
             }
             if (myController->x()) {
                 digitalWrite(Motor1Pin1, LOW);
